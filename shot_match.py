@@ -361,7 +361,9 @@ def export_ungraded_still(project, timeline, item, fps: int, path: Path) -> list
         for graph in capture_graphs(item):
             for i in range(1, (graph.GetNumNodes() or 0) + 1):
                 # No documented way to read a node's on/off state: re-enable only what we switched
-                was_on = graph.GetNodeEnabled(i) if hasattr(graph, "GetNodeEnabled") else None
+                # Resolve objects answer every attribute name, with None for the missing ones
+                getter = getattr(graph, "GetNodeEnabled", None)
+                was_on = getter(i) if callable(getter) else None
                 if was_on is False:
                     continue
                 if graph.SetNodeEnabled(i, False):
