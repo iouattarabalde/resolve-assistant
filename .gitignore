@@ -12,3 +12,7 @@ qc_reports/
 # Editor
 .vscode/
 *.swp
+
+# Shot match output: stills of client footage
+_shot_match/
+ShotMatch/
