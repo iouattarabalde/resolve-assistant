@@ -33,9 +33,16 @@ import time
 import urllib.request
 from pathlib import Path
 
-import numpy as np
-import tifffile
-from PIL import Image
+try:
+    import numpy as np
+    import tifffile
+    from PIL import Image
+except ImportError as missing:
+    # Resolve loads its own Python: packages must be installed into that one
+    print(f"Missing Python package: {missing.name}. In Resolve's Console (Py3), run\n"
+          "  import sys; print(sys.prefix)\n"
+          "then in a terminal:  \"<that folder>\\python.exe\" -m pip install numpy tifffile pillow mediapipe")
+    raise SystemExit(2)
 
 LINEAR_LAYER = 3
 CAPTURE_OFF_LAYERS = (3, 4)          # shot and scene layers
