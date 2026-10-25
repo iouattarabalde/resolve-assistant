@@ -372,16 +372,22 @@ def export_ungraded_still(project, timeline, item, fps: int, path: Path, keep_li
                 if was_on is False:
                     continue
                 if graph.SetNodeEnabled(i, False):
-                    switched.append((graph, i))
+                    switched.append((where, graph, i))
                 else:
-                    problems.append(f"could not switch off node {i}")
+                    problems.append(f"could not switch off {where} node {i}")
         time.sleep(0.5)   # let the viewer re-render before grabbing it
         if not project.ExportCurrentFrameAsStill(str(path)) or not path.exists():
             problems.append("still export failed")
     finally:
-        for graph, i in switched:
-            if not graph.SetNodeEnabled(i, True):
-                problems.append(f"COULD NOT SWITCH NODE {i} BACK ON, check this clip by hand")
+        for where, graph, i in switched:
+            # Seen once on 21.1: SetNodeEnabled(True) refused, so give Resolve a moment and retry
+            for attempt in range(3):
+                if graph.SetNodeEnabled(i, True):
+                    break
+                time.sleep(0.3)
+            else:
+                label = graph.GetNodeLabel(i) or "no label"
+                problems.append(f"COULD NOT SWITCH {where} NODE {i} ({label}) BACK ON, switch it on by hand")
     return problems
 
 
@@ -486,8 +492,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.stills:
             return run_offline(args.stills)
-        # Saved as "Shot Match Apply.py" in the Scripts folder, the same file writes the grade
-        return run_in_resolve(apply="apply" in Path(globals().get("__file__", "")).stem.lower())
+        # Saved as "Shot Match Apply.py" in the Scripts folder, the same file writes the grade.
+        # The Scripts menu does not set __file__, but the code object knows its file.
+        return run_in_resolve(apply="apply" in Path(main.__code__.co_filename).stem.lower())
     except Stop as stop:
         print(stop)
         return 2
