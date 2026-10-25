@@ -69,6 +69,9 @@ What it does to the project while it runs :
 - switches off every node of layers 3 and 4 and of the group Post-Clip graph (the hero's
   Linear node stays on), exports a still, then switches them back on. The API has no way to
   read whether a node was already off, so a node you had switched off yourself comes back on;
+- Apply only : **show layer 3 in the node editor before running.** `SetCDL` has no layer
+  argument and writes into whichever layer is on screen (run from layer 4, it wrote node 1
+  of layer 4).
 - Apply only : `SetCDL` replaces the Linear node's wheels. Lift, Gamma or Gain set by hand
   in that node are lost, and Resolve cannot undo it. Duplicate the timeline first.
 

@@ -394,7 +394,9 @@ def export_ungraded_still(project, timeline, item, fps: int, path: Path, keep_li
 def write_gains(rows: list[dict], targets: dict, out_dir: Path) -> None:
     """Gain into each shot's Linear node through SetCDL. Tested on 21.1: Slope lands on Gain
     R/G/B one to one, but a CDL Offset is folded into Gain, so Offset stays 0 and Power 1.
-    SetCDL replaces the node's wheels: hand-set Lift, Gamma or Gain in that node are lost."""
+    SetCDL replaces the node's wheels: hand-set Lift, Gamma or Gain in that node are lost.
+    SetCDL has no layer argument and writes into the layer the node editor is SHOWING
+    (seen on 21.1: run from layer 4, it wrote node 1 of layer 4)."""
     written, failed = [], []
     for r in rows:
         if r["gain"] is None or r["note"] == "hero" or r["clip"] not in targets:
@@ -436,7 +438,8 @@ def run_in_resolve(apply: bool = False) -> int:
     still_dir.mkdir(parents=True, exist_ok=True)
     if apply:
         print(f"Shot match APPLY: {len(clips)} clips, hero {hero.GetName()}. "
-              "Gain will be written into each Linear node, the hero's is left as it is.")
+              "Gain will be written into each Linear node, the hero's is left as it is.\n"
+              f"  It writes into the layer the node editor shows: layer {LINEAR_LAYER} must be on screen.")
     else:
         print(f"Shot match preview: {len(clips)} clips, hero {hero.GetName()}. Nothing is written to the grade.")
 
