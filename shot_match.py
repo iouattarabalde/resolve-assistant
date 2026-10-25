@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """First-pass shot match: every selected clip matched to a hero, with Gain only.
 
-Test 1 build, read-only towards the grade. From the Resolve Scripts menu it:
+From the Resolve Scripts menu it:
   1. takes the selected clips of the current timeline, and the clip under the playhead
      as the hero (it is added to the scene if it was not selected);
   2. checks that each clip has exactly one node labelled "Linear" in layer 3;
   3. exports one still per clip, at its middle frame, with every node of layers 3 and 4
-     and of the group Post-Clip graph switched off, then switches them back on;
-  4. solves exposure and white balance against the hero and prints Gain R/G/B.
-It writes nothing into any grade. It does move the playhead (put back at the end) and
-toggles nodes off and on, so run it on a copy of a project.
+     and of the group Post-Clip graph switched off (except the hero's Linear node, so
+     shots match the hero as graded), then switches them back on;
+  4. solves exposure and white balance against the hero and prints Gain R/G/B;
+  5. only when saved as "Shot Match Apply.py": writes that Gain into each shot's Linear
+     node. Saved under any other name it writes nothing.
+It moves the playhead (put back at the end) and toggles nodes off and on.
 
 Offline, on stills already exported (one name containing HERO):
   python shot_match.py --stills FOLDER
@@ -20,7 +22,7 @@ Solver (v05, tuned on two hand-matched scenes): exposure from surfaces both shot
 multiclass segmenter; without it, surfaces alone. White balance from the same groups.
 
 Needs Python 3.9+, numpy, tifffile, pillow; mediapipe for skin (optional).
-Values are relative to the hero with its Linear node at neutral.
+Offline, values are relative to the hero still as exported.
 """
 from __future__ import annotations
 
@@ -286,7 +288,7 @@ def write_outputs(rows: list[dict], sheet: list[np.ndarray], out_dir: Path) -> N
 
 
 def print_table(rows: list[dict]) -> None:
-    print("\n  Linear node, Gain R / G / B (Offset 25.00, Gamma 0.00). Hero at neutral.")
+    print("\n  Linear node, Gain R / G / B (Offset 25.00, Gamma 0.00), matched to the hero as graded.")
     for r in rows:
         g = r["gain"]
         if g is None:
@@ -342,24 +344,27 @@ def linear_node(item) -> int | None:
     return hits[0] if len(hits) == 1 else None
 
 
-def capture_graphs(item) -> list:
-    graphs = [item.GetNodeGraph(layer) for layer in CAPTURE_OFF_LAYERS]
+def capture_graphs(item) -> list[tuple[str, object]]:
+    graphs = [(f"layer {layer}", item.GetNodeGraph(layer)) for layer in CAPTURE_OFF_LAYERS]
     group = item.GetColorGroup()
     if group:
-        graphs.append(group.GetPostClipNodeGraph())
-    return [g for g in graphs if g]
+        graphs.append(("Post-Clip", group.GetPostClipNodeGraph()))
+    return [(where, g) for where, g in graphs if g]
 
 
-def export_ungraded_still(project, timeline, item, fps: int, path: Path) -> list[str]:
-    """Middle frame of the clip with layers 3-4 and Post-Clip off. Returns problems found."""
+def export_ungraded_still(project, timeline, item, fps: int, path: Path, keep_linear: int | None = None) -> list[str]:
+    """Middle frame of the clip with layers 3-4 and Post-Clip off, except the Linear node
+    `keep_linear` when given (the hero's, so shots match the hero as graded). Returns problems."""
     problems = []
     mid = (int(item.GetStart()) + int(item.GetEnd())) // 2
     if not timeline.SetCurrentTimecode(frames_to_tc(mid, fps)):
         return ["could not move the playhead to the clip"]
     switched = []
     try:
-        for graph in capture_graphs(item):
+        for where, graph in capture_graphs(item):
             for i in range(1, (graph.GetNumNodes() or 0) + 1):
+                if where == f"layer {LINEAR_LAYER}" and i == keep_linear:
+                    continue
                 # No documented way to read a node's on/off state: re-enable only what we switched
                 # Resolve objects answer every attribute name, with None for the missing ones
                 getter = getattr(graph, "GetNodeEnabled", None)
@@ -380,7 +385,27 @@ def export_ungraded_still(project, timeline, item, fps: int, path: Path) -> list
     return problems
 
 
-def run_in_resolve() -> int:
+def write_gains(rows: list[dict], targets: dict, out_dir: Path) -> None:
+    """Gain into each shot's Linear node through SetCDL. Tested on 21.1: Slope lands on Gain
+    R/G/B one to one, but a CDL Offset is folded into Gain, so Offset stays 0 and Power 1.
+    SetCDL replaces the node's wheels: hand-set Lift, Gamma or Gain in that node are lost."""
+    written, failed = [], []
+    for r in rows:
+        if r["gain"] is None or r["note"] == "hero" or r["clip"] not in targets:
+            continue
+        item, node = targets[r["clip"]]
+        g = r["gain"]
+        cdl = {"NodeIndex": str(node), "Slope": f"{g[0]:.4f} {g[1]:.4f} {g[2]:.4f}",
+               "Offset": "0.0000 0.0000 0.0000", "Power": "1.0000 1.0000 1.0000", "Saturation": "1.0000"}
+        (written if item.SetCDL(cdl) else failed).append(r["clip"])
+    with open(out_dir / "written.txt", "w") as f:
+        f.write("Gain written to the Linear node (layer 3) of:\n" + "\n".join(written) + "\n")
+        if failed:
+            f.write("\nSetCDL refused:\n" + "\n".join(failed) + "\n")
+    print(f"\n  Written: {len(written)} clips." + (f" REFUSED: {', '.join(failed)}" if failed else ""))
+
+
+def run_in_resolve(apply: bool = False) -> int:
     resolve = get_resolve()
     project = resolve.GetProjectManager().GetCurrentProject()
     timeline = project.GetCurrentTimeline() if project else None
@@ -403,9 +428,13 @@ def run_in_resolve() -> int:
     out_dir = OUT_ROOT / datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     still_dir = out_dir / "stills"
     still_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Shot match, test 1: {len(clips)} clips, hero {hero.GetName()}. Nothing is written to the grade.")
+    if apply:
+        print(f"Shot match APPLY: {len(clips)} clips, hero {hero.GetName()}. "
+              "Gain will be written into each Linear node, the hero's is left as it is.")
+    else:
+        print(f"Shot match preview: {len(clips)} clips, hero {hero.GetName()}. Nothing is written to the grade.")
 
-    stills, report = [], []
+    stills, report, targets = [], [], {}
     try:
         for n, item in enumerate(sorted(clips, key=lambda c: c.GetStart()), 1):
             name = f"{n:02d}_{item.GetName()}"
@@ -414,11 +443,13 @@ def run_in_resolve() -> int:
                 report.append(f"  {name}: skipped, needs exactly one node labelled Linear in layer {LINEAR_LAYER}")
                 continue
             path = still_dir / f"{name}.tif"
-            problems = export_ungraded_still(project, timeline, item, fps, path)
+            is_hero = item.GetUniqueId() == hero.GetUniqueId()
+            problems = export_ungraded_still(project, timeline, item, fps, path, node if is_hero else None)
             report.append(f"  {name}: Linear is node {node} of layer {LINEAR_LAYER}"
                           + (f"; {'; '.join(problems)}" if problems else ""))
             if path.exists():
-                stills.append((name, path, item.GetUniqueId() == hero.GetUniqueId()))
+                stills.append((name, path, is_hero))
+                targets[name] = (item, node)
     finally:
         timeline.SetCurrentTimecode(start_tc)
     print("\n".join(report))
@@ -430,6 +461,8 @@ def run_in_resolve() -> int:
     print(f"\n  Still format: {sample.shape[1]}x{sample.shape[0]}, {sample.dtype}")
     rows = match_stills([(s[0], s[1]) for s in stills], heroes[0][0], out_dir)
     print_table(rows)
+    if apply:
+        write_gains(rows, targets, out_dir)
     print(f"\n  Stills, values and contact sheet: {out_dir}")
     return 0
 
@@ -451,7 +484,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stills", type=Path, help="match exported stills offline instead of driving Resolve")
     args = parser.parse_args(argv)
     try:
-        return run_offline(args.stills) if args.stills else run_in_resolve()
+        if args.stills:
+            return run_offline(args.stills)
+        # Saved as "Shot Match Apply.py" in the Scripts folder, the same file writes the grade
+        return run_in_resolve(apply="apply" in Path(globals().get("__file__", "")).stem.lower())
     except Stop as stop:
         print(stop)
         return 2

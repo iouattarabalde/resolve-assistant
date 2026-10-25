@@ -48,21 +48,35 @@ the second is caught.
 
 ## shot_match.py
 
-First-pass shot matching on the Color page. Pick the hero by parking the playhead on it,
-select the other clips of the scene, run the script. Each clip is matched to the hero with
-Gain R/G/B only, the way the Linear node at the head of layer 3 is used.
+First-pass shot matching on the Color page. Park the playhead on the hero, select the other
+clips of the scene, run the script. Each clip is matched to the hero as graded, with Gain
+R/G/B only, in the node labelled `Linear` at the head of layer 3.
 
-**Test 1 build : it does not write into any grade yet.** It prints the values, and saves
-the stills it exported, a CSV and a before/after contact sheet to `Documents/ShotMatch/`.
+Install it twice in
+`%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\`:
 
-What it does to the project while it runs, so run it on a copy:
+| Saved as | Does |
+|---|---|
+| `Shot Match Preview.py` | prints the values, saves stills, a CSV and a before/after contact sheet to `Documents/ShotMatch/`. Writes nothing into the grade |
+| `Shot Match Apply.py` | the same, then writes Gain into each shot's Linear node. The hero is left as it is |
+
+The file decides from its own name : only a name containing "Apply" writes. Output appears in
+Workspace > Console; the first line says PREVIEW or APPLY.
+
+What it does to the project while it runs :
 
 - moves the playhead to the middle frame of each clip, and back where it was at the end;
-- switches off every node of layers 3 and 4 and of the group Post-Clip graph, exports a
-  still, then switches them back on. The API documents no way to read whether a node was
-  already off, so a node you had switched off yourself comes back on.
+- switches off every node of layers 3 and 4 and of the group Post-Clip graph (the hero's
+  Linear node stays on), exports a still, then switches them back on. The API has no way to
+  read whether a node was already off, so a node you had switched off yourself comes back on;
+- Apply only : `SetCDL` replaces the Linear node's wheels. Lift, Gamma or Gain set by hand
+  in that node are lost, and Resolve cannot undo it. Duplicate the timeline first.
 
 A clip is skipped unless it has exactly one node labelled `Linear` in layer 3.
+
+Tested on Resolve Studio 21.1 : `SetCDL` with the Linear node's index lands on layer 3, and
+Slope maps one to one onto Gain R/G/B. A CDL Offset does not reach the Offset wheel (it is
+folded into Gain), so the script writes Offset 0 and Power 1.
 
 How it matches : exposure from the surfaces both shots share (pixels grouped by colour, each
 group votes how many stops apart the shots are), pulled 40 % towards skin when both frames
@@ -71,13 +85,8 @@ matches on surfaces only. White balance from the same colour groups. Tuned on tw
 against hand matches : within ⅓ stop on 6 of 7 and 10 of 11 shots.
 
 ```
-python shot_match.py                    # from a terminal, with Resolve open
 python shot_match.py --stills FOLDER    # offline, on DaVinci Intermediate TIFFs, one named *HERO*
 ```
-
-To run it from the menu, copy it to
-`%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\`, then
-Workspace > Scripts > shot_match. The output appears in Workspace > Console.
 
 ### Needs
 
@@ -88,8 +97,10 @@ and `pip install numpy tifffile pillow mediapipe`. The skin model (16 MB) is dow
 ### Tests
 
 ```
-python -m unittest tests.test_shot_match -v
+python -m unittest tests.test_shot_match tests.test_shot_match_resolve -v
 ```
 
-Builds a hero and a shot one stop brighter and slightly warmer, framed differently, and
-checks the solver gives the inverse gain.
+The first builds a hero and a shot one stop brighter and slightly warmer, framed
+differently, and checks the solver gives the inverse gain. The second runs the Resolve side
+against a fake Resolve : which nodes are off at export, the playhead and nodes restored,
+and Gain written to the shot only in apply mode.
