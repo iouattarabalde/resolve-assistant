@@ -71,7 +71,9 @@ What it does to the project while it runs :
   read whether a node was already off, so a node you had switched off yourself comes back on;
 - Apply only : **show layer 3 in the node editor before running.** `SetCDL` has no layer
   argument and writes into whichever layer is on screen (run from layer 4, it wrote node 1
-  of layer 4).
+  of layer 4). The 21.1 API has no call to pick or read that layer, so after the solve a
+  window asks you to confirm layer 3 is showing. Cancel, or closing it, writes nothing.
+  Without that window (run from a terminal) nothing is written.
 - Apply only : `SetCDL` replaces the Linear node's wheels. Lift, Gamma or Gain set by hand
   in that node are lost, and Resolve cannot undo it. Duplicate the timeline first.
 

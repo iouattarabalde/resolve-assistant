@@ -100,6 +100,9 @@ class Resolve:
     def OpenPage(self, page): return True
 
 
+CONFIRM_WRITE = shot_match.confirm_write   # the real one, before setUp patches it
+
+
 class ResolveFlowTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -111,7 +114,9 @@ class ResolveFlowTest(unittest.TestCase):
         self.patches = [mock.patch.object(shot_match, "OUT_ROOT", Path(self.tmp.name)),
                         mock.patch.object(shot_match, "get_resolve", lambda: resolve),
                         mock.patch.object(shot_match, "SkinFinder", NoSkin),
-                        mock.patch.object(shot_match.time, "sleep", lambda s: None)]
+                        mock.patch.object(shot_match.time, "sleep", lambda s: None),
+                        mock.patch.object(shot_match, "confirm_write", lambda *a: self.confirm)]
+        self.confirm = True
         for p in self.patches:
             p.start()
 
@@ -140,6 +145,15 @@ class ResolveFlowTest(unittest.TestCase):
         self.assertEqual(self.shot.cdl["Offset"], "0.0000 0.0000 0.0000")
         slope = np.array([float(v) for v in self.shot.cdl["Slope"].split()])
         np.testing.assert_allclose(slope, 0.5, atol=0.04)
+
+    def test_apply_cancelled_writes_nothing(self):
+        self.confirm = False
+        shot_match.run_in_resolve(apply=True)
+        self.assertIsNone(self.shot.cdl)
+
+    def test_no_window_means_no_write(self):
+        no_fusion = mock.Mock(**{"Fusion.return_value": None})
+        self.assertFalse(CONFIRM_WRITE(no_fusion, 1, "hero"))
 
 
 if __name__ == "__main__":

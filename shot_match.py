@@ -391,6 +391,40 @@ def export_ungraded_still(project, timeline, item, fps: int, path: Path, keep_li
     return problems
 
 
+def confirm_write(resolve, count: int, hero_name: str) -> bool:
+    """Yes/Cancel window before Apply writes. The API cannot target a layer or tell which one
+    the node editor shows (checked in the 21.1 DaVinciResolveScript.pyi), so ask. No window,
+    no write."""
+    fu = globals().get("fu") or resolve.Fusion()
+    bmd = globals().get("bmd")   # the Scripts menu provides it, a terminal does not
+    ui = fu.UIManager if fu else None
+    if not ui or not bmd:
+        print("\n  Could not open the confirm window, so nothing was written. "
+              "Run Shot Match Apply from Workspace > Scripts.")
+        return False
+    disp = bmd.UIDispatcher(ui)
+    text = (f"Write Gain into the Linear node of {count} clips? The hero ({hero_name}) is left as it is.\n\n"
+            f"Resolve writes into the layer the node editor is showing. Check that layer {LINEAR_LAYER} "
+            "is on screen, or another node's wheels get overwritten, with no undo.")
+    win = disp.AddWindow({"ID": "ShotMatchConfirm", "WindowTitle": "Shot Match Apply",
+                          "Geometry": [400, 300, 460, 170]},
+                         ui.VGroup([ui.Label({"Text": text, "WordWrap": True}),
+                                    ui.HGroup([ui.Button({"ID": "Cancel", "Text": "Cancel", "Default": True}),
+                                               ui.Button({"ID": "Write", "Text": f"Layer {LINEAR_LAYER} is showing, write"})])]))
+    answer = {"write": False}
+
+    def close(ev, write=False):
+        answer["write"] = write
+        disp.ExitLoop()
+    win.On.Write.Clicked = lambda ev: close(ev, True)
+    win.On.Cancel.Clicked = close
+    win.On.ShotMatchConfirm.Close = close
+    win.Show()
+    disp.RunLoop()
+    win.Hide()
+    return answer["write"]
+
+
 def write_gains(rows: list[dict], targets: dict, out_dir: Path) -> None:
     """Gain into each shot's Linear node through SetCDL. Tested on 21.1: Slope lands on Gain
     R/G/B one to one, but a CDL Offset is folded into Gain, so Offset stays 0 and Power 1.
@@ -444,7 +478,8 @@ def run_in_resolve(apply: bool = False) -> int:
     if apply:
         print(f"Shot match APPLY: {len(clips)} clips, hero {hero.GetName()}. "
               "Gain will be written into each Linear node, the hero's is left as it is.\n"
-              f"  It writes into the layer the node editor shows: layer {LINEAR_LAYER} must be on screen.")
+              f"  It writes into the layer the node editor shows: layer {LINEAR_LAYER} must be on screen.\n"
+              "  A window asks you to confirm before anything is written.")
     else:
         print(f"Shot match preview: {len(clips)} clips, hero {hero.GetName()}. Nothing is written to the grade.")
 
@@ -476,7 +511,11 @@ def run_in_resolve(apply: bool = False) -> int:
     rows = match_stills([(s[0], s[1]) for s in stills], heroes[0][0], out_dir)
     print_table(rows)
     if apply:
-        write_gains(rows, targets, out_dir)
+        count = sum(1 for r in rows if r["gain"] is not None and r["note"] != "hero" and r["clip"] in targets)
+        if confirm_write(resolve, count, hero.GetName()):
+            write_gains(rows, targets, out_dir)
+        else:
+            print("\n  Cancelled: nothing written.")
     print(f"\n  Stills, values and contact sheet: {out_dir}")
     return 0
 
