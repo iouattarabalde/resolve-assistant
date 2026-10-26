@@ -59,8 +59,8 @@ class Timeline:
     def __init__(self, items, hero):
         self.items, self.hero, self.tc = items, hero, "01:00:00:00"
 
-    def GetSetting(self, key):
-        return {"timelineFrameRate": "24", "timelineDropFrameTimecode": "0"}[key]
+    def GetSettings(self):
+        return {"timelineFrameRate": 24.0, "timelineDropFrameTimecode": "0"}
 
     def GetCurrentVideoItem(self): return self.hero
     def GetSelectedClips(self): return [i for i in self.items if i is not self.hero]

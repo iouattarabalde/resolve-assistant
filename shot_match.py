@@ -419,9 +419,14 @@ def run_in_resolve(apply: bool = False) -> int:
     timeline = project.GetCurrentTimeline() if project else None
     if not timeline:
         raise Stop("Open a project and a timeline first, then run this again.")
-    if timeline.GetSetting("timelineDropFrameTimecode") == "1":
+    settings = timeline.GetSettings() or {}  # GetSetting(name) is deprecated in 21.1
+    rate = str(settings.get("timelineFrameRate", ""))
+    if str(settings.get("timelineDropFrameTimecode")) == "1" or "DF" in rate.upper():
         raise Stop("Drop-frame timelines are not supported yet.")
-    fps = round(float(timeline.GetSetting("timelineFrameRate")))
+    try:
+        fps = round(float(rate.split()[0]))
+    except (IndexError, ValueError):
+        raise Stop(f"Could not read the timeline frame rate (got {rate!r}).")
     hero = timeline.GetCurrentVideoItem()
     if not hero:
         raise Stop("Park the playhead on the hero clip, then run this again.")
