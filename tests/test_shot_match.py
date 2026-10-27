@@ -76,7 +76,7 @@ class SolverTest(unittest.TestCase):
     def test_timecode(self):
         self.assertEqual(shot_match.frames_to_tc(86400 + 25, 24), "01:00:01:01")
 
-    def test_measures_gain_and_gamma_of_a_node_and_flags_offset(self):
+    def test_measures_gain_gamma_and_offset_of_a_node(self):
         off = scene(3, np.ones(3), np.full(len(MATERIALS), 1 / len(MATERIALS))) / 65535.0
         lin = shot_match.decode_intermediate(off)
         gain = np.array([0.72, 0.75, 0.81])
@@ -84,12 +84,13 @@ class SolverTest(unittest.TestCase):
         def node(offset, power):   # calibrated wheel law: 0.0073 linear per Offset unit
             out = np.maximum(lin * gain + (offset - 25) * 0.0073, 1e-6) ** power
             return np.round(np.clip(encode(out), 0, 1) * 65535) / 65535
-        for power, gamma in ((1, 0), (1.2, -0.05)):
-            m = shot_match.measure_node(off, node(25, power))
+        for offset, power, gamma in ((25, 1, 0), (25, 1.2, -0.05), (24, 1, 0), (25.5, 1.2, -0.05)):
+            m = shot_match.measure_node(off, node(offset, power))
             np.testing.assert_allclose(m["gain"], gain, atol=0.01)
             np.testing.assert_allclose(m["gamma"], gamma, atol=0.003)
+            np.testing.assert_allclose(m["offset"], offset, atol=0.06)
+            self.assertEqual(m["offset_used"], offset != 25)
             self.assertLess(m["misfit_stops"], 0.05)
-        self.assertGreater(shot_match.measure_node(off, node(24, 1))["misfit_stops"], 0.1)
 
     def test_same_angle_shots_share_one_gain_unless_the_light_moved(self):
         a, b = np.zeros(48 * 27), np.zeros(48 * 27)

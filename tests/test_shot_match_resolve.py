@@ -185,6 +185,15 @@ class ResolveFlowTest(unittest.TestCase):
         slope = np.array([float(v) for v in self.shot.cdl["Slope"].split()])
         np.testing.assert_allclose(slope, 0.3, atol=0.03)
 
+    def test_collect_says_offset_untouched(self):
+        self.shot.hand_gain = np.full(3, 0.5)
+        with mock.patch.object(shot_match, "show_in_file_browser"):
+            shot_match.run_collect()
+        archive = next(Path(self.tmp.name).glob("collect_*.zip"))
+        shutil.unpack_archive(archive, Path(self.tmp.name) / "u")
+        truth = json.loads((Path(self.tmp.name) / "u" / archive.stem / "truth.json").read_text())
+        self.assertFalse(any(m["offset_used"] for m in truth["clips"].values()))
+
     def test_apply_cancelled_writes_nothing(self):
         self.confirm = False
         shot_match.run_in_resolve(apply=True)

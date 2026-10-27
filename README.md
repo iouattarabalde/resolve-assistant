@@ -65,10 +65,11 @@ The file decides from its own name : only a name containing "Apply" writes. Outp
 Workspace > Console; the first line says PREVIEW, APPLY or COLLECT.
 
 Collect exports each clip twice, Linear node off then on, with every other node of layers 3
-and 4 off both times, so only the Linear node is measured. Its Gain and Gamma per channel
-are fitted to the pair (a straight line in log; within 0.01 of the wheels on a real 21.1
-scene). Offset is left out, one wheel unit being below what two exports tell apart; a node
-whose Offset or curves moved is flagged. It saves the
+and 4 off both times, so only the Linear node is measured. Its Gain, Gamma and Offset per
+channel are fitted to the pair (within 0.01 of the wheels on a real 21.1 scene). One Offset
+unit is only 0.0073 linear, so an untouched wheel would read anywhere from 24.9 to 25.3:
+Offset is reported as used only when it sits 0.25 unit or more from 25 and clearly explains
+the frame better; otherwise it reads "not used". A node with curves or saturation is flagged. It saves the
 stills with the node off, the hero with it on (`hero_graded.tif`) and `truth.json`, zips
 them, keeps only the zip and opens Explorer on it.
 
@@ -111,9 +112,10 @@ against hand matches.
 Shots of one camera angle get one Gain, as in a hand first pass: shots whose thumbnails
 correlate above 0.9 form a group and take its median Gain, or the hero's own Gain when the
 hero is in it. A shot solved more than ⅓ stop from its group keeps its own value (the light
-moved). The hero is also exported with its Linear node off, to measure its Gain and Gamma:
-shots are solved under the hero's Gamma, and Apply writes that Gamma with the Gain (as CDL
-Power; not yet checked on the wheels in Resolve).
+moved). The hero is also exported with its Linear node off, to measure its Gain, Gamma and Offset:
+shots are solved under the hero's Gamma and Offset. Apply writes that Gamma with the Gain
+(as CDL Power; not yet checked on the wheels in Resolve). It cannot write Offset (`SetCDL`
+folds it into Gain), so when the hero has one, Apply prints it to dial by hand.
 
 Bench, three scenes and 32 shots matched by hand : 31 within ⅓ stop, exposure error RMS
 0.18 stop, white balance RMS 0.07 stop.
