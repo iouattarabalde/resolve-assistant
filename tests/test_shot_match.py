@@ -76,15 +76,18 @@ class SolverTest(unittest.TestCase):
     def test_timecode(self):
         self.assertEqual(shot_match.frames_to_tc(86400 + 25, 24), "01:00:01:01")
 
-    def test_measures_gain_offset_gamma_of_a_node(self):
-        off = scene(3, np.ones(3), np.full(len(MATERIALS), 1 / len(MATERIALS)))
-        lin = shot_match.decode_intermediate(off / 65535.0)
-        gain, offset, gamma = np.array([1.4, 1.5, 1.6]), np.array([24.0, 25.5, 24.5]), -0.06
-        on = np.maximum(lin * gain + (offset - 25) * shot_match.OFFSET_STEP, 1e-6) ** shot_match.wheel_power(gamma)
-        m = shot_match.measure_node(off / 65535.0, np.round(np.clip(encode(on), 0, 1) * 65535) / 65535)
-        np.testing.assert_allclose(m["gain"], gain, atol=0.02)
-        np.testing.assert_allclose(m["offset"], offset, atol=0.15)
-        np.testing.assert_allclose(m["gamma"], gamma, atol=0.006)
+    def test_measures_the_gain_of_a_node_and_flags_offset_or_gamma(self):
+        off = scene(3, np.ones(3), np.full(len(MATERIALS), 1 / len(MATERIALS))) / 65535.0
+        lin = shot_match.decode_intermediate(off)
+        gain = np.array([0.72, 0.75, 0.81])
+
+        def node(offset, power):   # calibrated wheel law: 0.0073 linear per Offset unit
+            out = np.maximum(lin * gain + (offset - 25) * 0.0073, 1e-6) ** power
+            return np.round(np.clip(encode(out), 0, 1) * 65535) / 65535
+        m = shot_match.measure_node(off, node(25, 1))
+        np.testing.assert_allclose(m["gain"], gain, atol=0.005)
+        self.assertLess(m["misfit_stops"], 0.05)
+        self.assertGreater(shot_match.measure_node(off, node(24, 1.2))["misfit_stops"], 0.1)
 
 
 class NoSkin:

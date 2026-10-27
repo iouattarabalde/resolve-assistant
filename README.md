@@ -65,10 +65,11 @@ The file decides from its own name : only a name containing "Apply" writes. Outp
 Workspace > Console; the first line says PREVIEW, APPLY or COLLECT.
 
 Collect exports each clip twice, Linear node off then on, with every other node of layers 3
-and 4 off both times, so only the Linear node is measured. From the pair it fits the node's
-Gain, Offset and Gamma per channel (the calibrated wheel law, recovered to 0.01 on test
-frames). It saves the stills with the node off, the hero with it on (`hero_graded.tif`) and
-`truth.json`. A node the three wheels cannot explain (curves, saturation) is flagged. Each collected scene is one
+and 4 off both times, so only the Linear node is measured. Its Gain R/G/B is the median
+per-pixel ratio of the pair, in linear (within 0.01 of the wheels on a real 21.1 scene). The
+solver works with Gain only, so a node whose Offset or Gamma moved is flagged. It saves the
+stills with the node off, the hero with it on (`hero_graded.tif`) and `truth.json`, zips
+the folder and opens Explorer on the zip. Each collected scene is one
 more scene to score and tune the solver on:
 
 ```

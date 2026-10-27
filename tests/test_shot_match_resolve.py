@@ -164,22 +164,24 @@ class ResolveFlowTest(unittest.TestCase):
     def test_collect_measures_the_hand_gain_and_writes_nothing(self):
         self.hero.hand_gain = np.array([1.04, 1.0, 0.96])
         self.shot.hand_gain = self.hero.hand_gain / 2   # the shot is lit twice as bright
-        self.assertEqual(shot_match.run_collect(), 0)
+        with mock.patch.object(shot_match, "show_in_file_browser") as shown:
+            self.assertEqual(shot_match.run_collect(), 0)
+        shown.assert_called_once()
         self.assertIsNone(self.shot.cdl)
         self.assertEqual(self.timeline.tc, "01:00:00:00")
         for item in (self.hero, self.shot):
             for graph in item.layers.values():
                 self.assertTrue(all(graph.enabled), f"{item.name} left a node off")
-        folder = next(Path(self.tmp.name).glob("collect_*"))
+        folder = next(p for p in Path(self.tmp.name).glob("collect_*") if p.is_dir())
         truth = json.loads((folder / "truth.json").read_text())
         self.assertEqual(truth["hero"], "01_hero")
         np.testing.assert_allclose(truth["clips"]["02_shot"]["gain"], [0.52, 0.5, 0.48], atol=0.005)
-        np.testing.assert_allclose(truth["clips"]["02_shot"]["offset"], 25, atol=0.1)
-        np.testing.assert_allclose(truth["clips"]["02_shot"]["gamma"], 0, atol=0.01)
+        self.assertLess(truth["clips"]["02_shot"]["misfit_stops"], 0.05)
         # The last export of each clip is the Linear-on one: every other layer 3 and 4 node off
         self.assertEqual(self.states["shot"], {1: [True], 3: [True, False], 4: [False]})
         self.assertTrue((folder / "hero_graded.tif").exists())
         self.assertFalse((folder / "_graded").exists())
+        self.assertTrue(folder.with_suffix(".zip").exists())
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
