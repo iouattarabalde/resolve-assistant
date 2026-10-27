@@ -174,7 +174,10 @@ class ResolveFlowTest(unittest.TestCase):
         truth = json.loads((folder / "truth.json").read_text())
         self.assertEqual(truth["hero"], "01_hero")
         np.testing.assert_allclose(truth["clips"]["02_shot"]["gain"], [0.52, 0.5, 0.48], atol=0.005)
-        self.assertLess(truth["clips"]["02_shot"]["spread_stops"], 0.05)
+        np.testing.assert_allclose(truth["clips"]["02_shot"]["offset"], 25, atol=0.1)
+        np.testing.assert_allclose(truth["clips"]["02_shot"]["gamma"], 0, atol=0.01)
+        # The last export of each clip is the Linear-on one: every other layer 3 and 4 node off
+        self.assertEqual(self.states["shot"], {1: [True], 3: [True, False], 4: [False]})
         self.assertTrue((folder / "hero_graded.tif").exists())
         self.assertFalse((folder / "_graded").exists())
 

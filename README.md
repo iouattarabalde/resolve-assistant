@@ -64,10 +64,11 @@ Install it twice in
 The file decides from its own name : only a name containing "Apply" writes. Output appears in
 Workspace > Console; the first line says PREVIEW, APPLY or COLLECT.
 
-Collect exports each clip twice, Linear node off then on, and measures the Gain from the
-ratio of the two (median per pixel, in linear). It saves the stills with the node off, the
-hero with it on (`hero_graded.tif`) and `truth.json`. A node that does more than Gain (Offset
-or Gamma moved) is flagged; its exposure is still measured. Each collected scene is one
+Collect exports each clip twice, Linear node off then on, with every other node of layers 3
+and 4 off both times, so only the Linear node is measured. From the pair it fits the node's
+Gain, Offset and Gamma per channel (the calibrated wheel law, recovered to 0.01 on test
+frames). It saves the stills with the node off, the hero with it on (`hero_graded.tif`) and
+`truth.json`. A node the three wheels cannot explain (curves, saturation) is flagged. Each collected scene is one
 more scene to score and tune the solver on:
 
 ```

@@ -76,6 +76,16 @@ class SolverTest(unittest.TestCase):
     def test_timecode(self):
         self.assertEqual(shot_match.frames_to_tc(86400 + 25, 24), "01:00:01:01")
 
+    def test_measures_gain_offset_gamma_of_a_node(self):
+        off = scene(3, np.ones(3), np.full(len(MATERIALS), 1 / len(MATERIALS)))
+        lin = shot_match.decode_intermediate(off / 65535.0)
+        gain, offset, gamma = np.array([1.4, 1.5, 1.6]), np.array([24.0, 25.5, 24.5]), -0.06
+        on = np.maximum(lin * gain + (offset - 25) * shot_match.OFFSET_STEP, 1e-6) ** shot_match.wheel_power(gamma)
+        m = shot_match.measure_node(off / 65535.0, np.round(np.clip(encode(on), 0, 1) * 65535) / 65535)
+        np.testing.assert_allclose(m["gain"], gain, atol=0.02)
+        np.testing.assert_allclose(m["offset"], offset, atol=0.15)
+        np.testing.assert_allclose(m["gamma"], gamma, atol=0.006)
+
 
 class NoSkin:
     reason = "disabled in tests"

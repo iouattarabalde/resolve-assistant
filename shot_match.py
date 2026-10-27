@@ -14,8 +14,9 @@ From the Resolve Scripts menu it:
 It moves the playhead (put back at the end) and toggles nodes off and on.
 
 Saved as "Shot Match Collect.py", on a scene you already matched by hand, it writes nothing
-either: it exports each clip with its Linear node off and on, measures the Gain your node
-applies, and saves stills plus truth.json, so the scene can tune the solver.
+either: it exports each clip with its Linear node off and on (every other node of layers 3 and 4
+off both times), measures the Gain, Offset and Gamma your node applies, and saves stills
+plus truth.json, so the scene can tune the solver.
 
 Scoring the solver against collected scenes:
   python shot_match.py --bench FOLDER [FOLDER ...]
@@ -308,22 +309,44 @@ def print_table(rows: list[dict]) -> None:
 
 # ─── Resolve ────────────────────────────────────────────────────
 
-def measure_gain(off: np.ndarray, on: np.ndarray) -> dict | None:
-    """What a Linear node does, from one frame exported with it off and on (DI stills).
-    Gain R/G/B and exposure are medians of per-pixel ratios; spread is the widest
-    interquartile range of those ratios, in stops: about 0 when the node is pure Gain."""
+OFFSET_STEP = 0.0073      # linear added per Offset wheel unit away from 25.00 (calibrated on 21.1)
+
+
+def wheel_power(gamma: float) -> float:
+    """Exponent of the Gamma wheel in a Linear node, pivot at linear 1.0 (calibrated on 21.1)."""
+    return 1 / (1 + 4 * gamma) if gamma >= 0 else 1 - 4 * gamma
+
+
+def measure_node(off: np.ndarray, on: np.ndarray) -> dict | None:
+    """Gain, Offset and Gamma wheels of a Linear node, from one frame exported with only
+    that node off and on (DI stills). Per channel, pixels are grouped in 40 levels and
+    on = (off * gain + (offset - 25) * OFFSET_STEP) ** power(gamma) is fitted to the
+    group medians; exposure is the median luma ratio, in stops."""
     a = off[::ANALYSIS_STEP, ::ANALYSIS_STEP].reshape(-1, 3)
     b = on[::ANALYSIS_STEP, ::ANALYSIS_STEP].reshape(-1, 3)
     ok = ((a < a.max(0) - CLIP_MARGIN_DI).all(1) & (b < b.max(0) - CLIP_MARGIN_DI).all(1)
-          & (a.min(1) > 2 * DI_LOG_CUT) & (b.min(1) > 2 * DI_LOG_CUT))
+          & (a.min(1) > 0.01) & (b.min(1) > 0.01))
     if ok.sum() < 1000:
         return None
     la, lb = decode_intermediate(a[ok]), decode_intermediate(b[ok])
-    ratio = np.log2(np.maximum(lb, 1e-6) / np.maximum(la, 1e-6))
-    q25, q75 = np.percentile(ratio, [25, 75], axis=0)
+    wheels, misfit = {"gain": [], "offset": [], "gamma": []}, 0.0
+    for c in range(3):
+        x, y = la[:, c], np.maximum(lb[:, c], 1e-6)
+        level = np.clip(np.searchsorted(np.quantile(x, np.linspace(0, 1, 41)), x) - 1, 0, 39)
+        xm = np.array([np.median(x[level == i]) for i in range(40)])
+        ym = np.array([np.median(y[level == i]) for i in range(40)])
+        best = None
+        for gamma in np.arange(-0.5, 0.5001, 0.005):
+            p = wheel_power(gamma)
+            gain, lift = np.linalg.lstsq(np.c_[xm, np.ones(40)], ym ** (1 / p), rcond=None)[0]
+            err = np.mean(np.log2(np.maximum(xm * gain + lift, 1e-6) ** p / ym) ** 2)
+            if best is None or err < best[0]:
+                best = (err, gain, 25 + lift / OFFSET_STEP, gamma)
+        misfit = max(misfit, np.sqrt(best[0]))
+        for key, value in zip(("gain", "offset", "gamma"), best[1:]):
+            wheels[key].append(round(float(value), 3))
     exposure = np.median(np.log2(np.maximum(luma(lb), 1e-6) / np.maximum(luma(la), 1e-6)))
-    return {"gain": [round(float(g), 4) for g in 2.0 ** np.median(ratio, axis=0)],
-            "exposure_stops": round(float(exposure), 3), "spread_stops": round(float((q75 - q25).max()), 3)}
+    return {**wheels, "exposure_stops": round(float(exposure), 3), "misfit_stops": round(float(misfit), 3)}
 
 
 def run_bench(folders: list[Path]) -> int:
@@ -609,7 +632,7 @@ def run_collect() -> int:
             off, on = still_dir / f"{name}.tif", graded_dir / f"{name}.tif"
             problems = (export_ungraded_still(project, timeline, item, fps, off)
                         + export_ungraded_still(project, timeline, item, fps, on, node))
-            m = measure_gain(load_still(off), load_still(on)) if off.exists() and on.exists() else None
+            m = measure_node(load_still(off), load_still(on)) if off.exists() and on.exists() else None
             if m is None:
                 problems.append("could not measure the Linear node")
             else:
@@ -617,8 +640,8 @@ def run_collect() -> int:
                 if item.GetUniqueId() == hero.GetUniqueId():
                     hero_name = name
                     on.replace(out_dir / "hero_graded.tif")
-                if m["spread_stops"] > 0.1:
-                    problems.append("the node does more than Gain (Offset or Gamma?): exposure is still measured")
+                if m["misfit_stops"] > 0.05:
+                    problems.append("the node does more than Gain, Offset and Gamma: values are approximate")
             report.append(f"  {name}: " + ("; ".join(problems) if problems else "measured"))
     finally:
         timeline.SetCurrentTimecode(start_tc)
@@ -629,10 +652,11 @@ def run_collect() -> int:
     if hero_name is None:
         raise Stop("The hero could not be measured, so nothing was saved. See the lines above.")
     (out_dir / "truth.json").write_text(json.dumps({"hero": hero_name, "clips": truth}, indent=1))
-    print("\n  Your Linear node, Gain R / G / B, as measured:")
+    print("\n  Your Linear node as measured:  Gain R / G / B   Offset R / G / B   Gamma R / G / B")
     for name, m in truth.items():
-        g = m["gain"]
-        print(f"  {name[:40]:40s}  {g[0]:.2f}  {g[1]:.2f}  {g[2]:.2f}   {m['exposure_stops']:+.2f} stops"
+        g, o, y = m["gain"], m["offset"], m["gamma"]
+        print(f"  {name[:40]:40s}  {g[0]:.2f} {g[1]:.2f} {g[2]:.2f}   {o[0]:.2f} {o[1]:.2f} {o[2]:.2f}"
+              f"   {y[0]:+.2f} {y[1]:+.2f} {y[2]:+.2f}   {m['exposure_stops']:+.2f} stops"
               + ("  (hero)" if name == hero_name else ""))
     print(f"\n  Saved: {out_dir}\n  Zip that folder and send it: it is one more scene to tune the solver on.")
     return 0
