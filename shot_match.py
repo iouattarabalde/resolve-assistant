@@ -403,14 +403,19 @@ def confirm_write(resolve, count: int, hero_name: str) -> bool:
               "Run Shot Match Apply from Workspace > Scripts.")
         return False
     disp = bmd.UIDispatcher(ui)
-    text = (f"Write Gain into the Linear node of {count} clips? The hero ({hero_name}) is left as it is.\n\n"
-            f"Resolve writes into the layer the node editor is showing. Check that layer {LINEAR_LAYER} "
-            "is on screen, or another node's wheels get overwritten, with no undo.")
+    text = (f"Write Gain to {count} clips? The hero, {hero_name}, is left as it is.\n\n"
+            f"Resolve writes into the layer on screen. Check that layer {LINEAR_LAYER} is showing: "
+            "a wrong layer is overwritten, with no undo.")
+    button = {"Weight": 0, "MinimumSize": [88, 24], "MaximumSize": [88, 24]}
+    # Weight 0 on the button row keeps the layout from stretching the buttons to fill the window
     win = disp.AddWindow({"ID": "ShotMatchConfirm", "WindowTitle": "Shot Match Apply",
-                          "Geometry": [400, 300, 460, 170]},
-                         ui.VGroup([ui.Label({"Text": text, "WordWrap": True}),
-                                    ui.HGroup([ui.Button({"ID": "Cancel", "Text": "Cancel", "Default": True}),
-                                               ui.Button({"ID": "Write", "Text": f"Layer {LINEAR_LAYER} is showing, write"})])]))
+                          "Geometry": [400, 300, 420, 140]},
+                         ui.VGroup({"Spacing": 12}, [
+                             ui.Label({"Text": text, "WordWrap": True, "Weight": 1}),
+                             ui.HGroup({"Weight": 0, "Spacing": 8}, [
+                                 ui.HGap(0, 1),
+                                 ui.Button({"ID": "Cancel", "Text": "Cancel", **button}),
+                                 ui.Button({"ID": "Write", "Text": "Write", **button})])]))
     answer = {"write": False}
 
     def close(ev, write=False):
