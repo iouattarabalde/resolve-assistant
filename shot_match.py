@@ -15,7 +15,7 @@ It moves the playhead (put back at the end) and toggles nodes off and on.
 
 Saved as "Shot Match Collect.py", on a scene you already matched by hand, it writes nothing
 either: it exports each clip with its Linear node off and on (every other node of layers 3 and 4
-off both times), measures the Gain your node applies, and saves stills plus truth.json, so the scene can tune the solver.
+off both times), measures the Gain and Gamma of your node, and saves stills plus truth.json, so the scene can tune the solver.
 
 Scoring the solver against collected scenes:
   python shot_match.py --bench FOLDER [FOLDER ...]
@@ -27,6 +27,8 @@ Solver (v05, tuned on two hand-matched scenes): exposure from surfaces both shot
 (pixels grouped by chromaticity, each group votes how many stops apart they are), pulled
 40 % towards skin when both frames show skin. Skin comes from MediaPipe's selfie
 multiclass segmenter; without it, surfaces alone. White balance from the same groups.
+Shots of one camera angle (thumbnails alike) share one Gain unless the light moved, and
+shots are solved under the hero's own Gamma, measured from one extra hero export.
 
 Needs Python 3.9+, numpy, tifffile, pillow; mediapipe for skin (optional).
 Offline, values are relative to the hero still as exported.
@@ -81,6 +83,8 @@ MIN_BIN_PIXELS = 200
 NEUTRAL_SCALE = 0.05       # chroma distance that doubles a group's weight
 SKIN_WEIGHT = 0.4
 MIN_SKIN_PIXELS = 300      # at 1/4 resolution
+SAME_ANGLE = 0.9           # thumbnail correlation above which two shots are one camera angle
+LIGHT_CHANGE_STOPS = 1 / 3 # a shot solved this far from its group keeps its own value
 WB_BINS, WB_STEP, WB_ITERATIONS = 24, 0.5, 3
 
 
@@ -251,14 +255,22 @@ def solve(src, hero, src_skin, hero_skin) -> dict:
     return {"gain": gain, "surfaces": surfaces, "skin": skin, "spread": float(votes.std()), "note": ""}
 
 
-def match_stills(stills: list[tuple[str, Path]], hero_name: str, out_dir: Path) -> list[dict]:
-    """stills: (clip name, still path). Writes match_values.csv and contact_sheet.jpg."""
+def match_stills(stills: list[tuple[str, Path]], hero_name: str, out_dir: Path,
+                 hero_power=None, hero_gain=None) -> list[dict]:
+    """stills: (clip name, still path), the hero as graded. Writes match_values.csv and
+    contact_sheet.jpg. hero_power: the Gamma exponent per channel of the hero's Linear node.
+    The hero is taken back before that Gamma, so each Gain is the one that, under the same
+    Gamma, matches the hero: the value to dial into a node that keeps its Gamma.
+    hero_gain: the Gain of the hero's Linear node, given to shots of the hero's angle."""
     skin_finder = SkinFinder()
     if skin_finder.reason:
         print(f"  Skin: off, {skin_finder.reason}. Matching on surfaces only.")
     encoded = {name: load_still(path) for name, path in stills}
     hero_enc = encoded[hero_name]
     hero_px, hero_skin = analysis_pixels(hero_enc), skin_finder.pixels(hero_enc)
+    power = np.ones(3) if hero_power is None else np.asarray(hero_power, float)
+    if not np.allclose(power, 1, atol=0.005):
+        hero_px, hero_skin = hero_px ** (1 / power), hero_skin ** (1 / power)
     rows, sheet = [], []
     for name, _ in stills:
         if name == hero_name:
@@ -268,12 +280,63 @@ def match_stills(stills: list[tuple[str, Path]], hero_name: str, out_dir: Path) 
             r = solve(analysis_pixels(enc), hero_px, skin_finder.pixels(enc), hero_skin)
         r["clip"] = name
         rows.append(r)
-        lin = decode_intermediate(encoded[name][::4, ::4])
-        after = lin * r["gain"] if r["gain"] is not None else lin
-        sheet.append(np.hstack([preview(lin), preview(after)]))
     skin_finder.close()
+    group_by_angle(rows, {name: fingerprint(enc) for name, enc in encoded.items()}, hero_gain)
+    for r in rows:
+        lin = decode_intermediate(encoded[r["clip"]][::4, ::4])
+        after = np.maximum(lin * r["gain"], 0) ** power if r["gain"] is not None else lin
+        sheet.append(np.hstack([preview(lin), preview(after)]))
     write_outputs(rows, sheet, out_dir)
     return rows
+
+
+def fingerprint(encoded: np.ndarray) -> np.ndarray:
+    """48 x 27 thumbnail of log luma, centred and scaled to unit length: two shots of one
+    camera angle correlate above SAME_ANGLE whatever their exposure or contrast."""
+    y = np.log2(np.maximum(luma(decode_intermediate(encoded[::8, ::8])), 1e-4))
+    v = np.asarray(Image.fromarray(y.astype(np.float32)).resize((48, 27), Image.BILINEAR)).ravel()
+    v = v - v.mean()
+    return v / max(float(np.linalg.norm(v)), 1e-9)
+
+
+def group_by_angle(rows: list[dict], prints: dict, hero_gain=None) -> None:
+    """One Gain per camera angle, as in a hand first pass. Shots whose thumbnails correlate
+    above SAME_ANGLE (chained) form a group; each takes the group's median Gain, or the
+    hero's own Gain when the hero is in it. A shot solved more than LIGHT_CHANGE_STOPS from
+    its group keeps its own value: the light moved."""
+    names = [r["clip"] for r in rows if r["gain"] is not None]
+    group = {n: n for n in names}
+
+    def root(n):
+        while group[n] != n:
+            n = group[n]
+        return n
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            if float(prints[a] @ prints[b]) > SAME_ANGLE:
+                group[root(b)] = root(a)
+    by_name = {r["clip"]: r for r in rows}
+    groups = {}
+    for n in names:
+        groups.setdefault(root(n), []).append(by_name[n])
+    for members in groups.values():
+        shots = [r for r in members if r["note"] != "hero"]
+        if len(members) < 2 or not shots:
+            continue
+        has_hero = len(shots) < len(members)
+        if has_hero and hero_gain is not None:
+            target = np.asarray(hero_gain, float)
+        elif has_hero:
+            continue   # the hero's own Gain is unknown, so each shot keeps its solve
+        else:
+            target = 2 ** np.median([np.log2(r["gain"]) for r in shots], axis=0)
+        label = ", ".join(r["clip"][:2] for r in members)
+        for r in shots:
+            if abs(np.log2(luma(r["gain"]) / luma(target))) > LIGHT_CHANGE_STOPS:
+                r["note"] = (r["note"] + "; " if r["note"] else "") + "same angle as " + label + ", light differs"
+                continue
+            r["solved"], r["gain"] = r["gain"], target
+            r["note"] = (r["note"] + "; " if r["note"] else "") + "angle " + label
 
 
 def write_outputs(rows: list[dict], sheet: list[np.ndarray], out_dir: Path) -> None:
@@ -299,24 +362,33 @@ def write_outputs(rows: list[dict], sheet: list[np.ndarray], out_dir: Path) -> N
     canvas.save(out_dir / "contact_sheet.jpg", quality=90)
 
 
-def print_table(rows: list[dict]) -> None:
-    print("\n  Linear node, Gain R / G / B (Offset 25.00, Gamma 0.00), matched to the hero as graded.")
+def print_table(rows: list[dict], hero_power=None) -> None:
+    power = np.ones(3) if hero_power is None else np.asarray(hero_power, float)
+    gamma = " ".join(f"{gamma_wheel(p):+.2f}" for p in power)
+    print(f"\n  Linear node, Gain R / G / B (Offset 25.00, Gamma {gamma} as on the hero), matched to the hero as graded.")
     for r in rows:
         g = r["gain"]
         if g is None:
             print(f"  {r['clip'][:40]:40s}  skipped: {r['note']}")
             continue
-        flag = "  (hero)" if r["note"] == "hero" else ""
-        print(f"  {r['clip'][:40]:40s}  {g[0]:.2f}  {g[1]:.2f}  {g[2]:.2f}   {np.log2(luma(g)):+.2f} stops{flag}")
+        note = "  (hero)" if r["note"] == "hero" else (f"  {r['note']}" if r["note"] else "")
+        print(f"  {r['clip'][:40]:40s}  {g[0]:.2f}  {g[1]:.2f}  {g[2]:.2f}   {np.log2(luma(g)):+.2f} stops{note}")
 
 
 # ─── Resolve ────────────────────────────────────────────────────
 
+def gamma_wheel(power: float) -> float:
+    """Gamma wheel value of a Linear node from its exponent (calibrated on 21.1: pivot at
+    linear 1.0, exponent 1 / (1 + 4 g) for g > 0 and 1 - 4 g below)."""
+    return (1 / power - 1) / 4 if power <= 1 else (1 - power) / 4
+
+
 def measure_node(off: np.ndarray, on: np.ndarray) -> dict | None:
-    """Gain R/G/B of a Linear node, from one frame exported with only that node off and on
-    (DI stills): the median per-pixel ratio, in linear. Offset and Gamma are not solved
-    (the solver works with Gain only), but a node that moved them is caught by the misfit:
-    per channel, pixels are grouped in 40 levels and Gain alone must explain every level."""
+    """Gain and Gamma of a Linear node, from one frame exported with only that node off and
+    on (DI stills). Per channel, pixels are grouped in 40 levels and on = (off * gain) ** power
+    is fitted to the group medians, a straight line in log. Offset is left out: one wheel unit
+    is 0.0073 linear, below what two exports tell apart. Misfit is the worst level left
+    unexplained, in stops: a node that also moved Offset, curves or saturation shows there."""
     a = off[::ANALYSIS_STEP, ::ANALYSIS_STEP].reshape(-1, 3)
     b = on[::ANALYSIS_STEP, ::ANALYSIS_STEP].reshape(-1, 3)
     ok = ((a < a.max(0) - CLIP_MARGIN_DI).all(1) & (b < b.max(0) - CLIP_MARGIN_DI).all(1)
@@ -324,16 +396,29 @@ def measure_node(off: np.ndarray, on: np.ndarray) -> dict | None:
     if ok.sum() < 1000:
         return None
     la, lb = decode_intermediate(a[ok]), decode_intermediate(b[ok])
-    ratio = np.log2(np.maximum(lb, 1e-6) / np.maximum(la, 1e-6))
-    gain = np.median(ratio, axis=0)
-    misfit = 0.0
+    gain, power, misfit = [], [], 0.0
     for c in range(3):
-        level = np.clip(np.searchsorted(np.quantile(la[:, c], np.linspace(0, 1, 41)), la[:, c]) - 1, 0, 39)
-        per_level = np.array([np.median(ratio[level == i, c]) for i in range(40)])
-        misfit = max(misfit, float(np.abs(per_level - gain[c]).max()))
+        x, y = np.log2(np.maximum(la[:, c], 1e-6)), np.log2(np.maximum(lb[:, c], 1e-6))
+        level = np.clip(np.searchsorted(np.quantile(x, np.linspace(0, 1, 41)), x) - 1, 0, 39)
+        xm = np.array([np.median(x[level == i]) for i in range(40)])
+        ym = np.array([np.median(y[level == i]) for i in range(40)])
+        p, lift = np.polyfit(xm, ym, 1)
+        gain.append(2.0 ** (lift / p))
+        power.append(p)
+        misfit = max(misfit, float(np.abs(ym - (p * xm + lift)).max()))
     exposure = np.median(np.log2(np.maximum(luma(lb), 1e-6) / np.maximum(luma(la), 1e-6)))
-    return {"gain": [round(float(g), 4) for g in 2.0 ** gain],
+    return {"gain": [round(float(g), 4) for g in gain],
+            "gamma": [round(gamma_wheel(p), 3) for p in power],
+            "power": [round(float(p), 4) for p in power],
             "exposure_stops": round(float(exposure), 3), "misfit_stops": round(misfit, 3)}
+
+
+def output_exposure(encoded: np.ndarray, gain, power=None) -> float:
+    """Median exposure change, in stops, of a Linear node with this Gain and Gamma exponent."""
+    small = encoded[::ANALYSIS_STEP, ::ANALYSIS_STEP].reshape(-1, 3)
+    lin = decode_intermediate(small[(small < small.max(0) - CLIP_MARGIN_DI).all(1) & (small.min(1) > 2 * DI_LOG_CUT)])
+    out = np.maximum(lin * np.asarray(gain), 1e-6) ** (1 if power is None else np.asarray(power))
+    return float(np.median(np.log2(np.maximum(luma(out), 1e-6) / np.maximum(luma(lin), 1e-6))))
 
 
 def run_bench(folders: list[Path]) -> int:
@@ -345,15 +430,18 @@ def run_bench(folders: list[Path]) -> int:
         stills = [(name, folder / "stills" / f"{name}.tif") for name in truth["clips"]]
         # Shots are matched to the hero as graded, as in Resolve
         stills = [(n, folder / "hero_graded.tif" if n == hero else p) for n, p in stills]
-        rows = match_stills(stills, hero, folder / "_bench")
+        rows = match_stills(stills, hero, folder / "_bench", truth["clips"][hero].get("power"),
+                            truth["clips"][hero]["gain"])
         print(f"\n  {folder.name}  (hero {hero})\n  clip                                      solver   hand    error")
         for r in rows:
             if r["note"] == "hero" or r["gain"] is None:
                 continue
             hand = truth["clips"][r["clip"]]
-            # Both map the ungraded shot onto the graded hero, so they compare as they are
+            # Compared on what reaches the screen: median exposure change of the shot, the
+            # solver's Gain under the hero's Gamma against what the hand node measured
             hand_gain, hand_ev = np.array(hand["gain"]), hand["exposure_stops"]
-            ev = float(np.log2(luma(r["gain"])))
+            ev = output_exposure(load_still(folder / "stills" / f"{r['clip']}.tif"), r["gain"],
+                                 truth["clips"][hero].get("power"))
             wb = float(np.log2(r["gain"][2] / r["gain"][0]) - np.log2(hand_gain[2] / hand_gain[0]))
             errors.append((ev - hand_ev, wb))
             flag = "" if abs(ev - hand_ev) <= 1 / 3 else "   <-- over 1/3 stop"
@@ -497,12 +585,15 @@ def confirm_write(resolve, count: int, hero_name: str) -> bool:
     return answer["write"]
 
 
-def write_gains(rows: list[dict], targets: dict, out_dir: Path) -> None:
+def write_gains(rows: list[dict], targets: dict, out_dir: Path, hero_power=None) -> None:
     """Gain into each shot's Linear node through SetCDL. Tested on 21.1: Slope lands on Gain
-    R/G/B one to one, but a CDL Offset is folded into Gain, so Offset stays 0 and Power 1.
-    SetCDL replaces the node's wheels: hand-set Lift, Gamma or Gain in that node are lost.
-    SetCDL has no layer argument and writes into the layer the node editor is SHOWING
-    (seen on 21.1: run from layer 4, it wrote node 1 of layer 4)."""
+    R/G/B one to one, but a CDL Offset is folded into Gain, so Offset stays 0. Power carries
+    the hero's Gamma exponent (1 when the hero has none): NOT YET CHECKED that Resolve puts
+    it on the Gamma wheel with the calibrated law. SetCDL replaces the node's wheels:
+    hand-set Lift, Gamma or Gain in that node are lost. SetCDL has no layer argument and
+    writes into the layer the node editor is SHOWING (seen on 21.1: run from layer 4, it
+    wrote node 1 of layer 4)."""
+    power = np.ones(3) if hero_power is None else np.asarray(hero_power, float)
     written, failed = [], []
     for r in rows:
         if r["gain"] is None or r["note"] == "hero" or r["clip"] not in targets:
@@ -510,7 +601,8 @@ def write_gains(rows: list[dict], targets: dict, out_dir: Path) -> None:
         item, node = targets[r["clip"]]
         g = r["gain"]
         cdl = {"NodeIndex": str(node), "Slope": f"{g[0]:.4f} {g[1]:.4f} {g[2]:.4f}",
-               "Offset": "0.0000 0.0000 0.0000", "Power": "1.0000 1.0000 1.0000", "Saturation": "1.0000"}
+               "Offset": "0.0000 0.0000 0.0000", "Power": f"{power[0]:.4f} {power[1]:.4f} {power[2]:.4f}",
+               "Saturation": "1.0000"}
         (written if item.SetCDL(cdl) else failed).append(r["clip"])
     with open(out_dir / "written.txt", "w") as f:
         f.write("Gain written to the Linear node (layer 3) of:\n" + "\n".join(written) + "\n")
@@ -609,18 +701,39 @@ def run_in_resolve(apply: bool = False) -> int:
             raise Stop("No still of the hero, so nothing to match against. See the lines above.")
         sample = tifffile.imread(str(heroes[0][1]))
         print(f"\n  Still format: {sample.shape[1]}x{sample.shape[0]}, {sample.dtype}")
-        rows = match_stills([(s[0], s[1]) for s in stills], heroes[0][0], out_dir)
-        print_table(rows)
+        hero_node = measure_hero_node(project, timeline, hero, fps, targets[heroes[0][0]][1],
+                                      load_still(heroes[0][1]), still_dir / "_hero_off.tif")
+        hero_power = hero_node["power"] if hero_node else None
+        rows = match_stills([(s[0], s[1]) for s in stills], heroes[0][0], out_dir,
+                            hero_power, hero_node["gain"] if hero_node else None)
+        print_table(rows, hero_power)
         if apply:
             count = sum(1 for r in rows if r["gain"] is not None and r["note"] != "hero" and r["clip"] in targets)
             if confirm_write(resolve, count, hero.GetName()):
-                write_gains(rows, targets, out_dir)
+                write_gains(rows, targets, out_dir, hero_power)
             else:
                 print("\n  Cancelled: nothing written.")
     finally:
         shutil.rmtree(still_dir, ignore_errors=True)   # 12 MB a clip; the contact sheet shows them
     print(f"\n  Values and contact sheet: {out_dir}")
     return 0
+
+
+def measure_hero_node(project, timeline, hero, fps: int, node: int, graded: np.ndarray, path: Path) -> dict | None:
+    """Gain and Gamma of the hero's Linear node: one more export of the hero with it off."""
+    start_tc = timeline.GetCurrentTimecode()
+    try:
+        problems = export_ungraded_still(project, timeline, hero, fps, path)
+    finally:
+        timeline.SetCurrentTimecode(start_tc)
+    m = measure_node(load_still(path), graded) if path.exists() else None
+    if m is None:
+        print("  Hero's Linear node: could not be measured" + (f" ({'; '.join(problems)})" if problems else "")
+              + ". Shots are matched without its Gamma.")
+        return None
+    if m["misfit_stops"] > 0.1:
+        print("  Hero's Linear node does more than Gain and Gamma (Offset moved?): values are approximate.")
+    return m
 
 
 def run_collect() -> int:
@@ -655,7 +768,7 @@ def run_collect() -> int:
                     hero_name = name
                     on.replace(out_dir / "hero_graded.tif")
                 if m["misfit_stops"] > 0.1:
-                    problems.append("the node does more than Gain (Offset or Gamma moved?): Gain is approximate")
+                    problems.append("the node does more than Gain and Gamma (Offset moved?): values are approximate")
             report.append(f"  {name}: " + ("; ".join(problems) if problems else "measured"))
     finally:
         timeline.SetCurrentTimecode(start_tc)
@@ -666,10 +779,10 @@ def run_collect() -> int:
     if hero_name is None:
         raise Stop("The hero could not be measured, so nothing was saved. See the lines above.")
     (out_dir / "truth.json").write_text(json.dumps({"hero": hero_name, "clips": truth}, indent=1))
-    print("\n  Your Linear node as measured:  Gain R / G / B")
+    print("\n  Your Linear node as measured:  Gain R / G / B    Gamma R / G / B")
     for name, m in truth.items():
-        g = m["gain"]
-        print(f"  {name[:40]:40s}  {g[0]:.2f}  {g[1]:.2f}  {g[2]:.2f}   {m['exposure_stops']:+.2f} stops"
+        g, y = m["gain"], m["gamma"]
+        print(f"  {name[:40]:40s}  {g[0]:.2f}  {g[1]:.2f}  {g[2]:.2f}    {y[0]:+.2f} {y[1]:+.2f} {y[2]:+.2f}"
               + ("  (hero)" if name == hero_name else ""))
     archive = Path(shutil.make_archive(str(out_dir), "zip", out_dir.parent, out_dir.name))
     shutil.rmtree(out_dir, ignore_errors=True)   # the zip holds it all

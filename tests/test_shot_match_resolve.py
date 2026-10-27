@@ -21,7 +21,7 @@ import tifffile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import shot_match  # noqa: E402
-from tests.test_shot_match import NoSkin, scene  # noqa: E402
+from tests.test_shot_match import NoSkin, encode, scene  # noqa: E402
 
 EVEN = np.full(6, 1 / 6)
 
@@ -47,7 +47,7 @@ class Item:
         self.name, self.start, self.light = name, start, light
         self.layers = {1: Graph(["Input"]), 3: Graph(["Linear", "Window"]), 4: Graph(["Scene"])}
         self.cdl = None
-        self.hand_gain = np.ones(3)   # what the Linear node does when it is on
+        self.hand_gain, self.hand_power = np.ones(3), 1.0   # what the Linear node does when on
 
     def GetName(self): return self.name
     def GetUniqueId(self): return self.name
@@ -91,9 +91,12 @@ class Project:
     def ExportCurrentFrameAsStill(self, path):
         item = self.timeline.item_at_playhead()
         # Record what was switched off at the moment of the export
-        self.test.states[item.name] = {l: list(g.enabled) for l, g in item.layers.items()}
-        light = item.light * (item.hand_gain if item.layers[3].enabled[0] else 1)
-        tifffile.imwrite(path, scene(1 if item is self.timeline.hero else 2, light, EVEN))
+        self.test.states.setdefault(item.name, []).append({l: list(g.enabled) for l, g in item.layers.items()})
+        img = scene(1 if item is self.timeline.hero else 2, item.light, EVEN)
+        if item.layers[3].enabled[0]:   # the Linear node: Gain then Gamma, in linear
+            lin = shot_match.decode_intermediate(img / 65535.0)
+            img = (np.clip(encode(np.maximum(lin * item.hand_gain, 1e-6) ** item.hand_power), 0, 1) * 65535).astype(np.uint16)
+        tifffile.imwrite(path, img)
         return True
 
 
@@ -160,8 +163,10 @@ class ResolveFlowTest(unittest.TestCase):
 
     def test_capture_switches_the_right_nodes(self):
         shot_match.run_in_resolve(apply=False)
-        self.assertEqual(self.states["shot"], {1: [True], 3: [False, False], 4: [False]})
-        self.assertEqual(self.states["hero"], {1: [True], 3: [True, False], 4: [False]})
+        self.assertEqual(self.states["shot"], [{1: [True], 3: [False, False], 4: [False]}])
+        # The hero as graded (Linear on), then once more with it off to measure its Gamma
+        self.assertEqual(self.states["hero"], [{1: [True], 3: [True, False], 4: [False]},
+                                               {1: [True], 3: [False, False], 4: [False]}])
 
     def test_apply_writes_gain_to_the_shot_only(self):
         shot_match.run_in_resolve(apply=True)
@@ -170,6 +175,15 @@ class ResolveFlowTest(unittest.TestCase):
         self.assertEqual(self.shot.cdl["Offset"], "0.0000 0.0000 0.0000")
         slope = np.array([float(v) for v in self.shot.cdl["Slope"].split()])
         np.testing.assert_allclose(slope, 0.5, atol=0.04)
+
+    def test_apply_carries_the_hero_gamma(self):
+        self.hero.hand_gain, self.hero.hand_power = np.array([0.6, 0.6, 0.6]), 1.2
+        shot_match.run_in_resolve(apply=True)
+        power = np.array([float(v) for v in self.shot.cdl["Power"].split()])
+        np.testing.assert_allclose(power, 1.2, atol=0.01)
+        # Under that Gamma the shot (twice as bright) needs half the hero's Gain
+        slope = np.array([float(v) for v in self.shot.cdl["Slope"].split()])
+        np.testing.assert_allclose(slope, 0.3, atol=0.03)
 
     def test_apply_cancelled_writes_nothing(self):
         self.confirm = False
@@ -201,7 +215,7 @@ class ResolveFlowTest(unittest.TestCase):
         np.testing.assert_allclose(truth["clips"]["02_shot"]["gain"], [0.52, 0.5, 0.48], atol=0.005)
         self.assertLess(truth["clips"]["02_shot"]["misfit_stops"], 0.05)
         # The last export of each clip is the Linear-on one: every other layer 3 and 4 node off
-        self.assertEqual(self.states["shot"], {1: [True], 3: [True, False], 4: [False]})
+        self.assertEqual(self.states["shot"][-1], {1: [True], 3: [True, False], 4: [False]})
         self.assertTrue((folder / "hero_graded.tif").exists())
         self.assertFalse((folder / "_graded").exists())
 

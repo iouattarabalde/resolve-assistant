@@ -76,7 +76,7 @@ class SolverTest(unittest.TestCase):
     def test_timecode(self):
         self.assertEqual(shot_match.frames_to_tc(86400 + 25, 24), "01:00:01:01")
 
-    def test_measures_the_gain_of_a_node_and_flags_offset_or_gamma(self):
+    def test_measures_gain_and_gamma_of_a_node_and_flags_offset(self):
         off = scene(3, np.ones(3), np.full(len(MATERIALS), 1 / len(MATERIALS))) / 65535.0
         lin = shot_match.decode_intermediate(off)
         gain = np.array([0.72, 0.75, 0.81])
@@ -84,10 +84,28 @@ class SolverTest(unittest.TestCase):
         def node(offset, power):   # calibrated wheel law: 0.0073 linear per Offset unit
             out = np.maximum(lin * gain + (offset - 25) * 0.0073, 1e-6) ** power
             return np.round(np.clip(encode(out), 0, 1) * 65535) / 65535
-        m = shot_match.measure_node(off, node(25, 1))
-        np.testing.assert_allclose(m["gain"], gain, atol=0.005)
-        self.assertLess(m["misfit_stops"], 0.05)
-        self.assertGreater(shot_match.measure_node(off, node(24, 1.2))["misfit_stops"], 0.1)
+        for power, gamma in ((1, 0), (1.2, -0.05)):
+            m = shot_match.measure_node(off, node(25, power))
+            np.testing.assert_allclose(m["gain"], gain, atol=0.01)
+            np.testing.assert_allclose(m["gamma"], gamma, atol=0.003)
+            self.assertLess(m["misfit_stops"], 0.05)
+        self.assertGreater(shot_match.measure_node(off, node(24, 1))["misfit_stops"], 0.1)
+
+    def test_same_angle_shots_share_one_gain_unless_the_light_moved(self):
+        a, b = np.zeros(48 * 27), np.zeros(48 * 27)
+        a[0], b[1] = 1, 1
+        rows = [{"clip": "hero", "gain": np.ones(3), "note": "hero"},
+                {"clip": "A1", "gain": np.full(3, 0.80), "note": ""},
+                {"clip": "A2", "gain": np.full(3, 0.70), "note": ""},
+                {"clip": "A3", "gain": np.full(3, 0.30), "note": ""},   # same angle, light moved
+                {"clip": "H1", "gain": np.full(3, 0.65), "note": ""}]
+        prints = {"hero": b, "A1": a, "A2": a, "A3": a, "H1": b}
+        shot_match.group_by_angle(rows, prints, hero_gain=[0.6, 0.6, 0.6])
+        gains = {r["clip"]: r["gain"][0] for r in rows}
+        self.assertAlmostEqual(gains["A1"], gains["A2"])
+        self.assertAlmostEqual(gains["A3"], 0.30)
+        self.assertAlmostEqual(gains["H1"], 0.6)   # the hero's angle takes the hero's own Gain
+        self.assertEqual(gains["hero"], 1.0)
 
 
 class NoSkin:
