@@ -59,9 +59,20 @@ Install it twice in
 |---|---|
 | `Shot Match Preview.py` | prints the values, saves stills, a CSV and a before/after contact sheet to `Documents/ShotMatch/`. Writes nothing into the grade |
 | `Shot Match Apply.py` | the same, then writes Gain into each shot's Linear node. The hero is left as it is |
+| `Shot Match Collect.py` | on a scene you matched by hand: measures what each Linear node does and saves it to `Documents/ShotMatch/collect_*/`. Writes nothing into the grade |
 
 The file decides from its own name : only a name containing "Apply" writes. Output appears in
-Workspace > Console; the first line says PREVIEW or APPLY.
+Workspace > Console; the first line says PREVIEW, APPLY or COLLECT.
+
+Collect exports each clip twice, Linear node off then on, and measures the Gain from the
+ratio of the two (median per pixel, in linear). It saves the stills with the node off, the
+hero with it on (`hero_graded.tif`) and `truth.json`. A node that does more than Gain (Offset
+or Gamma moved) is flagged; its exposure is still measured. Each collected scene is one
+more scene to score and tune the solver on:
+
+```
+python shot_match.py --bench FOLDER [FOLDER ...]    # solver vs hand, per shot and overall
+```
 
 What it does to the project while it runs :
 
@@ -87,7 +98,7 @@ How it matches : exposure from the surfaces both shots share (pixels grouped by 
 group votes how many stops apart the shots are), pulled 40 % towards skin when both frames
 show skin. Skin comes from MediaPipe's multiclass selfie segmenter; without MediaPipe it
 matches on surfaces only. White balance from the same colour groups. Tuned on two scenes
-against hand matches : within ⅓ stop on 6 of 7 and 10 of 11 shots.
+against hand matches : within ⅓ stop on 17 of 18 shots (exposure error RMS 0.23 stop).
 
 ```
 python shot_match.py --stills FOLDER    # offline, on DaVinci Intermediate TIFFs, one named *HERO*
@@ -108,4 +119,5 @@ python -m unittest tests.test_shot_match tests.test_shot_match_resolve -v
 The first builds a hero and a shot one stop brighter and slightly warmer, framed
 differently, and checks the solver gives the inverse gain. The second runs the Resolve side
 against a fake Resolve : which nodes are off at export, the playhead and nodes restored,
-and Gain written to the shot only in apply mode.
+and Gain written to the shot only in apply mode; Collect measuring a known hand Gain and
+the bench scoring it.

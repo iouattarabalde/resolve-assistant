@@ -5,6 +5,10 @@ Run from the repo root:  python3 -m unittest tests.test_shot_match_resolve -v
 """
 from __future__ import annotations
 
+import contextlib
+import io
+import json
+import re
 import sys
 import tempfile
 import unittest
@@ -42,6 +46,7 @@ class Item:
         self.name, self.start, self.light = name, start, light
         self.layers = {1: Graph(["Input"]), 3: Graph(["Linear", "Window"]), 4: Graph(["Scene"])}
         self.cdl = None
+        self.hand_gain = np.ones(3)   # what the Linear node does when it is on
 
     def GetName(self): return self.name
     def GetUniqueId(self): return self.name
@@ -86,7 +91,8 @@ class Project:
         item = self.timeline.item_at_playhead()
         # Record what was switched off at the moment of the export
         self.test.states[item.name] = {l: list(g.enabled) for l, g in item.layers.items()}
-        tifffile.imwrite(path, scene(1 if item is self.timeline.hero else 2, item.light, EVEN))
+        light = item.light * (item.hand_gain if item.layers[3].enabled[0] else 1)
+        tifffile.imwrite(path, scene(1 if item is self.timeline.hero else 2, light, EVEN))
         return True
 
 
@@ -154,6 +160,29 @@ class ResolveFlowTest(unittest.TestCase):
     def test_no_window_means_no_write(self):
         no_fusion = mock.Mock(**{"Fusion.return_value": None})
         self.assertFalse(CONFIRM_WRITE(no_fusion, 1, "hero"))
+
+    def test_collect_measures_the_hand_gain_and_writes_nothing(self):
+        self.hero.hand_gain = np.array([1.04, 1.0, 0.96])
+        self.shot.hand_gain = self.hero.hand_gain / 2   # the shot is lit twice as bright
+        self.assertEqual(shot_match.run_collect(), 0)
+        self.assertIsNone(self.shot.cdl)
+        self.assertEqual(self.timeline.tc, "01:00:00:00")
+        for item in (self.hero, self.shot):
+            for graph in item.layers.values():
+                self.assertTrue(all(graph.enabled), f"{item.name} left a node off")
+        folder = next(Path(self.tmp.name).glob("collect_*"))
+        truth = json.loads((folder / "truth.json").read_text())
+        self.assertEqual(truth["hero"], "01_hero")
+        np.testing.assert_allclose(truth["clips"]["02_shot"]["gain"], [0.52, 0.5, 0.48], atol=0.005)
+        self.assertLess(truth["clips"]["02_shot"]["spread_stops"], 0.05)
+        self.assertTrue((folder / "hero_graded.tif").exists())
+        self.assertFalse((folder / "_graded").exists())
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(shot_match.run_bench([folder]), 0)
+        rms = float(re.search(r"Exposure error RMS ([\d.]+)", out.getvalue()).group(1))
+        self.assertLess(rms, 0.1)
 
 
 if __name__ == "__main__":

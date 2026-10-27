@@ -13,6 +13,13 @@ From the Resolve Scripts menu it:
      node. Saved under any other name it writes nothing.
 It moves the playhead (put back at the end) and toggles nodes off and on.
 
+Saved as "Shot Match Collect.py", on a scene you already matched by hand, it writes nothing
+either: it exports each clip with its Linear node off and on, measures the Gain your node
+applies, and saves stills plus truth.json, so the scene can tune the solver.
+
+Scoring the solver against collected scenes:
+  python shot_match.py --bench FOLDER [FOLDER ...]
+
 Offline, on stills already exported (one name containing HERO):
   python shot_match.py --stills FOLDER
 
@@ -29,6 +36,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime
+import json
 import re
 import sys
 import time
@@ -300,6 +308,55 @@ def print_table(rows: list[dict]) -> None:
 
 # ─── Resolve ────────────────────────────────────────────────────
 
+def measure_gain(off: np.ndarray, on: np.ndarray) -> dict | None:
+    """What a Linear node does, from one frame exported with it off and on (DI stills).
+    Gain R/G/B and exposure are medians of per-pixel ratios; spread is the widest
+    interquartile range of those ratios, in stops: about 0 when the node is pure Gain."""
+    a = off[::ANALYSIS_STEP, ::ANALYSIS_STEP].reshape(-1, 3)
+    b = on[::ANALYSIS_STEP, ::ANALYSIS_STEP].reshape(-1, 3)
+    ok = ((a < a.max(0) - CLIP_MARGIN_DI).all(1) & (b < b.max(0) - CLIP_MARGIN_DI).all(1)
+          & (a.min(1) > 2 * DI_LOG_CUT) & (b.min(1) > 2 * DI_LOG_CUT))
+    if ok.sum() < 1000:
+        return None
+    la, lb = decode_intermediate(a[ok]), decode_intermediate(b[ok])
+    ratio = np.log2(np.maximum(lb, 1e-6) / np.maximum(la, 1e-6))
+    q25, q75 = np.percentile(ratio, [25, 75], axis=0)
+    exposure = np.median(np.log2(np.maximum(luma(lb), 1e-6) / np.maximum(luma(la), 1e-6)))
+    return {"gain": [round(float(g), 4) for g in 2.0 ** np.median(ratio, axis=0)],
+            "exposure_stops": round(float(exposure), 3), "spread_stops": round(float((q75 - q25).max()), 3)}
+
+
+def run_bench(folders: list[Path]) -> int:
+    """Solver against hand matches saved by Shot Match Collect (stills/ + truth.json)."""
+    errors = []
+    for folder in folders:
+        truth = json.loads((folder / "truth.json").read_text())
+        hero = truth["hero"]
+        stills = [(name, folder / "stills" / f"{name}.tif") for name in truth["clips"]]
+        # Shots are matched to the hero as graded, as in Resolve
+        stills = [(n, folder / "hero_graded.tif" if n == hero else p) for n, p in stills]
+        rows = match_stills(stills, hero, folder / "_bench")
+        print(f"\n  {folder.name}  (hero {hero})\n  clip                                      solver   hand    error")
+        for r in rows:
+            if r["note"] == "hero" or r["gain"] is None:
+                continue
+            hand = truth["clips"][r["clip"]]
+            # Both map the ungraded shot onto the graded hero, so they compare as they are
+            hand_gain, hand_ev = np.array(hand["gain"]), hand["exposure_stops"]
+            ev = float(np.log2(luma(r["gain"])))
+            wb = float(np.log2(r["gain"][2] / r["gain"][0]) - np.log2(hand_gain[2] / hand_gain[0]))
+            errors.append((ev - hand_ev, wb))
+            flag = "" if abs(ev - hand_ev) <= 1 / 3 else "   <-- over 1/3 stop"
+            print(f"  {r['clip'][:40]:40s}  {ev:+.2f}   {hand_ev:+.2f}   {ev - hand_ev:+.2f}{flag}")
+    if not errors:
+        raise Stop("No shots to score.")
+    ev_err, wb_err = np.array(errors).T
+    print(f"\n  {len(errors)} shots. Exposure error RMS {np.sqrt(np.mean(ev_err ** 2)):.2f}, "
+          f"max {np.abs(ev_err).max():.2f} stops, {int((np.abs(ev_err) <= 1 / 3).sum())} within 1/3 stop. "
+          f"White balance (B/R) RMS {np.sqrt(np.mean(wb_err ** 2)):.2f} stops.")
+    return 0
+
+
 class Stop(Exception):
     """A plain-language reason to stop, printed as is."""
 
@@ -452,7 +509,8 @@ def write_gains(rows: list[dict], targets: dict, out_dir: Path) -> None:
     print(f"\n  Written: {len(written)} clips." + (f" REFUSED: {', '.join(failed)}" if failed else ""))
 
 
-def run_in_resolve(apply: bool = False) -> int:
+def open_scene():
+    """resolve, project, timeline, fps, hero, clips (hero included), or Stop."""
     resolve = get_resolve()
     project = resolve.GetProjectManager().GetCurrentProject()
     timeline = project.GetCurrentTimeline() if project else None
@@ -474,7 +532,11 @@ def run_in_resolve(apply: bool = False) -> int:
         clips.append(hero)
     if len(clips) < 2:
         raise Stop("Select the clips of the scene (the hero can be one of them), then run this again.")
+    return resolve, project, timeline, fps, hero, clips
 
+
+def run_in_resolve(apply: bool = False) -> int:
+    resolve, project, timeline, fps, hero, clips = open_scene()
     resolve.OpenPage("color")
     start_tc = timeline.GetCurrentTimecode()
     out_dir = OUT_ROOT / datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -525,6 +587,57 @@ def run_in_resolve(apply: bool = False) -> int:
     return 0
 
 
+def run_collect() -> int:
+    """Measure the Linear node of a scene matched by hand. Writes nothing to the grade."""
+    resolve, project, timeline, fps, hero, clips = open_scene()
+    resolve.OpenPage("color")
+    start_tc = timeline.GetCurrentTimecode()
+    out_dir = OUT_ROOT / ("collect_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
+    still_dir, graded_dir = out_dir / "stills", out_dir / "_graded"
+    still_dir.mkdir(parents=True, exist_ok=True)
+    graded_dir.mkdir()
+    print(f"Shot match COLLECT: {len(clips)} clips, hero {hero.GetName()}. "
+          "Measures your Linear nodes; nothing is written to the grade.")
+    truth, report, hero_name = {}, [], None
+    try:
+        for n, item in enumerate(sorted(clips, key=lambda c: c.GetStart()), 1):
+            name = f"{n:02d}_{item.GetName()}"
+            node = linear_node(item)
+            if node is None:
+                report.append(f"  {name}: skipped, needs exactly one node labelled Linear in layer {LINEAR_LAYER}")
+                continue
+            off, on = still_dir / f"{name}.tif", graded_dir / f"{name}.tif"
+            problems = (export_ungraded_still(project, timeline, item, fps, off)
+                        + export_ungraded_still(project, timeline, item, fps, on, node))
+            m = measure_gain(load_still(off), load_still(on)) if off.exists() and on.exists() else None
+            if m is None:
+                problems.append("could not measure the Linear node")
+            else:
+                truth[name] = m
+                if item.GetUniqueId() == hero.GetUniqueId():
+                    hero_name = name
+                    on.replace(out_dir / "hero_graded.tif")
+                if m["spread_stops"] > 0.1:
+                    problems.append("the node does more than Gain (Offset or Gamma?): exposure is still measured")
+            report.append(f"  {name}: " + ("; ".join(problems) if problems else "measured"))
+    finally:
+        timeline.SetCurrentTimecode(start_tc)
+        for leftover in graded_dir.glob("*.tif"):
+            leftover.unlink()
+        graded_dir.rmdir()
+    print("\n".join(report))
+    if hero_name is None:
+        raise Stop("The hero could not be measured, so nothing was saved. See the lines above.")
+    (out_dir / "truth.json").write_text(json.dumps({"hero": hero_name, "clips": truth}, indent=1))
+    print("\n  Your Linear node, Gain R / G / B, as measured:")
+    for name, m in truth.items():
+        g = m["gain"]
+        print(f"  {name[:40]:40s}  {g[0]:.2f}  {g[1]:.2f}  {g[2]:.2f}   {m['exposure_stops']:+.2f} stops"
+              + ("  (hero)" if name == hero_name else ""))
+    print(f"\n  Saved: {out_dir}\n  Zip that folder and send it: it is one more scene to tune the solver on.")
+    return 0
+
+
 def run_offline(folder: Path) -> int:
     stills = sorted((p for p in folder.iterdir() if p.suffix.lower() in (".tif", ".tiff")),
                     key=lambda p: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", p.name)])
@@ -540,13 +653,19 @@ def run_offline(folder: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--stills", type=Path, help="match exported stills offline instead of driving Resolve")
+    parser.add_argument("--bench", type=Path, nargs="+", help="score the solver on folders saved by Collect")
     args = parser.parse_args(argv)
     try:
         if args.stills:
             return run_offline(args.stills)
-        # Saved as "Shot Match Apply.py" in the Scripts folder, the same file writes the grade.
-        # The Scripts menu does not set __file__, but the code object knows its file.
-        return run_in_resolve(apply="apply" in Path(main.__code__.co_filename).stem.lower())
+        if args.bench:
+            return run_bench(args.bench)
+        # The same file does three jobs, picked by the name it is saved under in the Scripts
+        # folder. The Scripts menu does not set __file__, but the code object knows its file.
+        stem = Path(main.__code__.co_filename).stem.lower()
+        if "collect" in stem:
+            return run_collect()
+        return run_in_resolve(apply="apply" in stem)
     except Stop as stop:
         print(stop)
         return 2
