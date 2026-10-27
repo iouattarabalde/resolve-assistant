@@ -60,6 +60,8 @@ LINEAR_LAYER = 3
 CAPTURE_OFF_LAYERS = (3, 4)          # shot and scene layers
 LINEAR_LABEL = "Linear"
 OUT_ROOT = Path.home() / "Documents" / "ShotMatch"
+KEEP_DAYS = 30                       # older runs in OUT_ROOT are deleted at the start of a run
+RUN_NAME = re.compile(r"(collect_)?(\d{8}_\d{6})(\.zip)?")
 MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/image_segmenter/"
              "selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite")
 MODEL_PATH = Path.home() / ".shot_match" / "selfie_multiclass_256x256.tflite"
@@ -517,6 +519,28 @@ def write_gains(rows: list[dict], targets: dict, out_dir: Path) -> None:
     print(f"\n  Written: {len(written)} clips." + (f" REFUSED: {', '.join(failed)}" if failed else ""))
 
 
+def clean_old_runs(now: datetime.datetime | None = None) -> None:
+    """Delete runs older than KEEP_DAYS from OUT_ROOT. Only names this script creates
+    (20261027_161135, collect_20261027_161135, collect_20261027_161135.zip) are touched."""
+    if not OUT_ROOT.is_dir():
+        return
+    cutoff = (now or datetime.datetime.now()) - datetime.timedelta(days=KEEP_DAYS)
+    removed, freed = 0, 0
+    for entry in OUT_ROOT.iterdir():
+        match = RUN_NAME.fullmatch(entry.name)
+        if not match or datetime.datetime.strptime(match.group(2), "%Y%m%d_%H%M%S") >= cutoff:
+            continue
+        files = [entry] if entry.is_file() else [f for f in entry.rglob("*") if f.is_file()]
+        size = sum(f.stat().st_size for f in files)
+        try:
+            entry.unlink() if entry.is_file() else shutil.rmtree(entry)
+        except OSError:
+            continue
+        removed, freed = removed + 1, freed + size
+    if removed:
+        print(f"  Cleaned {OUT_ROOT}: {removed} runs older than {KEEP_DAYS} days deleted, {freed / 1e6:.0f} MB freed.")
+
+
 def open_scene():
     """resolve, project, timeline, fps, hero, clips (hero included), or Stop."""
     resolve = get_resolve()
@@ -545,6 +569,7 @@ def open_scene():
 
 def run_in_resolve(apply: bool = False) -> int:
     resolve, project, timeline, fps, hero, clips = open_scene()
+    clean_old_runs()
     resolve.OpenPage("color")
     start_tc = timeline.GetCurrentTimecode()
     out_dir = OUT_ROOT / datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -578,26 +603,30 @@ def run_in_resolve(apply: bool = False) -> int:
         timeline.SetCurrentTimecode(start_tc)
     print("\n".join(report))
 
-    heroes = [s for s in stills if s[2]]
-    if not heroes:
-        raise Stop("No still of the hero, so nothing to match against. See the lines above.")
-    sample = tifffile.imread(str(heroes[0][1]))
-    print(f"\n  Still format: {sample.shape[1]}x{sample.shape[0]}, {sample.dtype}")
-    rows = match_stills([(s[0], s[1]) for s in stills], heroes[0][0], out_dir)
-    print_table(rows)
-    if apply:
-        count = sum(1 for r in rows if r["gain"] is not None and r["note"] != "hero" and r["clip"] in targets)
-        if confirm_write(resolve, count, hero.GetName()):
-            write_gains(rows, targets, out_dir)
-        else:
-            print("\n  Cancelled: nothing written.")
-    print(f"\n  Stills, values and contact sheet: {out_dir}")
+    try:
+        heroes = [s for s in stills if s[2]]
+        if not heroes:
+            raise Stop("No still of the hero, so nothing to match against. See the lines above.")
+        sample = tifffile.imread(str(heroes[0][1]))
+        print(f"\n  Still format: {sample.shape[1]}x{sample.shape[0]}, {sample.dtype}")
+        rows = match_stills([(s[0], s[1]) for s in stills], heroes[0][0], out_dir)
+        print_table(rows)
+        if apply:
+            count = sum(1 for r in rows if r["gain"] is not None and r["note"] != "hero" and r["clip"] in targets)
+            if confirm_write(resolve, count, hero.GetName()):
+                write_gains(rows, targets, out_dir)
+            else:
+                print("\n  Cancelled: nothing written.")
+    finally:
+        shutil.rmtree(still_dir, ignore_errors=True)   # 12 MB a clip; the contact sheet shows them
+    print(f"\n  Values and contact sheet: {out_dir}")
     return 0
 
 
 def run_collect() -> int:
     """Measure the Linear node of a scene matched by hand. Writes nothing to the grade."""
     resolve, project, timeline, fps, hero, clips = open_scene()
+    clean_old_runs()
     resolve.OpenPage("color")
     start_tc = timeline.GetCurrentTimecode()
     out_dir = OUT_ROOT / ("collect_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -643,6 +672,7 @@ def run_collect() -> int:
         print(f"  {name[:40]:40s}  {g[0]:.2f}  {g[1]:.2f}  {g[2]:.2f}   {m['exposure_stops']:+.2f} stops"
               + ("  (hero)" if name == hero_name else ""))
     archive = Path(shutil.make_archive(str(out_dir), "zip", out_dir.parent, out_dir.name))
+    shutil.rmtree(out_dir, ignore_errors=True)   # the zip holds it all
     print(f"\n  Saved: {archive}\n  Send that zip: it is one more scene to tune the solver on.")
     show_in_file_browser(archive)
     return 0

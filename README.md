@@ -57,7 +57,7 @@ Install it twice in
 
 | Saved as | Does |
 |---|---|
-| `Shot Match Preview.py` | prints the values, saves stills, a CSV and a before/after contact sheet to `Documents/ShotMatch/`. Writes nothing into the grade |
+| `Shot Match Preview.py` | prints the values, saves a CSV and a before/after contact sheet to `Documents/ShotMatch/`. Writes nothing into the grade |
 | `Shot Match Apply.py` | the same, then writes Gain into each shot's Linear node. The hero is left as it is |
 | `Shot Match Collect.py` | on a scene you matched by hand: measures what each Linear node does and saves it to `Documents/ShotMatch/collect_*/`. Writes nothing into the grade |
 
@@ -69,7 +69,12 @@ and 4 off both times, so only the Linear node is measured. Its Gain R/G/B is the
 per-pixel ratio of the pair, in linear (within 0.01 of the wheels on a real 21.1 scene). The
 solver works with Gain only, so a node whose Offset or Gamma moved is flagged. It saves the
 stills with the node off, the hero with it on (`hero_graded.tif`) and `truth.json`, zips
-the folder and opens Explorer on the zip. Each collected scene is one
+them, keeps only the zip and opens Explorer on it.
+
+`Documents/ShotMatch/` stays small : Preview and Apply delete their stills (12 MB a clip)
+once solved and keep the CSV, the contact sheet and the list of clips written. At the start
+of every run, runs older than 30 days are deleted (`KEEP_DAYS`). Only the names the script
+creates are touched; anything else in that folder is left alone. Each collected scene is one
 more scene to score and tune the solver on:
 
 ```

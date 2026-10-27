@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -131,9 +132,27 @@ class ResolveFlowTest(unittest.TestCase):
             p.stop()
         self.tmp.cleanup()
 
+    def test_old_runs_are_cleaned_and_only_ours(self):
+        out = Path(self.tmp.name)
+        old_run, new_run = out / "20260901_120000", out / "20261020_120000"
+        for d in (old_run, new_run):
+            (d / "stills").mkdir(parents=True)
+            (d / "stills" / "a.tif").write_bytes(b"x" * 10)
+        (out / "collect_20260901_120000.zip").write_bytes(b"x")
+        (out / "20260901_notes.txt").write_text("mine")      # not a name the script makes
+        with mock.patch("sys.stdout", io.StringIO()):
+            shot_match.clean_old_runs(now=shot_match.datetime.datetime(2026, 10, 27))
+        self.assertFalse(old_run.exists())
+        self.assertFalse((out / "collect_20260901_120000.zip").exists())
+        self.assertTrue(new_run.exists())
+        self.assertTrue((out / "20260901_notes.txt").exists())
+
     def test_preview_writes_nothing_and_restores(self):
         self.assertEqual(shot_match.run_in_resolve(apply=False), 0)
         self.assertIsNone(self.shot.cdl)
+        run = next(Path(self.tmp.name).glob("2*"))
+        self.assertTrue((run / "contact_sheet.jpg").exists())
+        self.assertFalse((run / "stills").exists(), "stills are deleted once solved")
         self.assertEqual(self.timeline.tc, "01:00:00:00")
         for item in (self.hero, self.shot):
             for graph in item.layers.values():
@@ -172,7 +191,11 @@ class ResolveFlowTest(unittest.TestCase):
         for item in (self.hero, self.shot):
             for graph in item.layers.values():
                 self.assertTrue(all(graph.enabled), f"{item.name} left a node off")
-        folder = next(p for p in Path(self.tmp.name).glob("collect_*") if p.is_dir())
+        out = Path(self.tmp.name)
+        archive = next(out.glob("collect_*.zip"))
+        self.assertFalse(archive.with_suffix("").exists(), "the folder should only live in the zip")
+        shutil.unpack_archive(archive, out / "unzipped")
+        folder = out / "unzipped" / archive.stem
         truth = json.loads((folder / "truth.json").read_text())
         self.assertEqual(truth["hero"], "01_hero")
         np.testing.assert_allclose(truth["clips"]["02_shot"]["gain"], [0.52, 0.5, 0.48], atol=0.005)
@@ -181,7 +204,6 @@ class ResolveFlowTest(unittest.TestCase):
         self.assertEqual(self.states["shot"], {1: [True], 3: [True, False], 4: [False]})
         self.assertTrue((folder / "hero_graded.tif").exists())
         self.assertFalse((folder / "_graded").exists())
-        self.assertTrue(folder.with_suffix(".zip").exists())
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
