@@ -24,10 +24,11 @@ Scoring the solver against collected scenes:
 Offline, on stills already exported (one name containing HERO):
   python shot_match.py --stills FOLDER
 
-Solver (v06, tuned on four hand-matched scenes): exposure from surfaces both shots share
+Solver (v07, tuned on five hand-matched scenes): exposure from surfaces both shots share
 (pixels grouped by chromaticity, each group votes how many stops apart they are), pulled
 10 % towards skin when both frames show skin. Skin comes from MediaPipe's selfie
-multiclass segmenter; without it, surfaces alone. White balance from the same groups.
+multiclass segmenter; without it, surfaces alone. Past 1/2 stop from the hero only 30 % of
+the rest is corrected (other light is kept). White balance from the same groups.
 Shots of one camera angle (thumbnails alike) share one Gain unless the light moved, and
 shots are solved under the hero's own Gamma, measured from one extra hero export.
 
@@ -83,6 +84,8 @@ CLIP_MARGIN_DI = 0.015     # sensor clip differs per shot, so it is measured per
 GRIDS = [(b, s) for b in (16, 20, 24, 28, 32) for s in (0.0, 0.5)]
 MIN_BIN_PIXELS = 200
 NEUTRAL_SCALE = 0.05       # chroma distance that doubles a group's weight
+KEEP_LIGHT_FROM = 0.5      # stops: beyond this, only part of the gap to the hero is closed
+KEEP_LIGHT_SHARE = 0.3     # share of the gap beyond KEEP_LIGHT_FROM that is corrected
 SKIN_WEIGHT = 0.1   # 0.4 until 2026-10-28; 0.1 scores best on the 4 bench scenes (56/60)
 MIN_SKIN_PIXELS = 300      # at 1/4 resolution
 SAME_ANGLE = 0.9           # thumbnail correlation above which two shots are one camera angle
@@ -241,6 +244,16 @@ def white_balance(src, hero):
     return wb / luma(wb)
 
 
+def keep_light(exposure: float) -> float:
+    """A shot far brighter or darker than the hero is usually other light (sun against the
+    shade of a shelter), which a first pass keeps: close the first KEEP_LIGHT_FROM stops,
+    then only KEEP_LIGHT_SHARE of the rest. Tuned on the 5 bench scenes, 2026-10-28."""
+    size = abs(exposure)
+    if size <= KEEP_LIGHT_FROM:
+        return exposure
+    return float(np.sign(exposure) * (KEEP_LIGHT_FROM + (size - KEEP_LIGHT_FROM) * KEEP_LIGHT_SHARE))
+
+
 def solve(src, hero, src_skin, hero_skin) -> dict:
     votes = np.array([surface_vote(src, hero, b, s) for b, s in GRIDS])
     votes = votes[~np.isnan(votes)]
@@ -252,6 +265,7 @@ def solve(src, hero, src_skin, hero_skin) -> dict:
     if len(src_skin) >= MIN_SKIN_PIXELS and len(hero_skin) >= MIN_SKIN_PIXELS:
         skin = float(np.log2(np.median(luma(hero_skin)) / np.median(luma(src_skin))))
         exposure = surfaces + SKIN_WEIGHT * (skin - surfaces)
+    exposure = keep_light(exposure)
     # Balancing before voting was tried: lower RMS, but 8/11 instead of 10/11 within 1/3 stop
     gain = 2 ** exposure * white_balance(src, hero)
     return {"gain": gain, "surfaces": surfaces, "skin": skin, "spread": float(votes.std()), "note": ""}

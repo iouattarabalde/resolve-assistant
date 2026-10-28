@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +40,9 @@ def scene(seed, light, shares):
 class SolverTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # the synthetic shots differ by exposure only: correct all of it
+        cls.keep = mock.patch.object(shot_match, "KEEP_LIGHT_FROM", float("inf"))
+        cls.keep.start()
         cls.tmp = tempfile.TemporaryDirectory()
         folder = Path(cls.tmp.name)
         even = np.full(len(MATERIALS), 1 / len(MATERIALS))
@@ -54,6 +58,7 @@ class SolverTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         shot_match.SkinFinder = cls.skin_finder
+        cls.keep.stop()
         cls.tmp.cleanup()
 
     def test_recovers_exposure_and_white_balance(self):
@@ -107,6 +112,12 @@ class SolverTest(unittest.TestCase):
         self.assertAlmostEqual(gains["A3"], 0.30)
         self.assertAlmostEqual(gains["H1"], 0.6)   # the hero's angle takes the hero's own Gain
         self.assertEqual(gains["hero"], 1.0)
+
+    @mock.patch.object(shot_match, "KEEP_LIGHT_FROM", 0.5)
+    def test_far_light_is_only_partly_corrected(self):
+        self.assertEqual(shot_match.keep_light(0.4), 0.4)
+        self.assertAlmostEqual(shot_match.keep_light(-1.5), -0.8)
+        self.assertAlmostEqual(shot_match.keep_light(1.0), 0.65)
 
     def test_two_named_cameras_are_never_one_angle(self):
         a = np.ones(4) / 2

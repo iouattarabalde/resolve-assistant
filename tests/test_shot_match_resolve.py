@@ -134,6 +134,8 @@ class ResolveFlowTest(unittest.TestCase):
                         mock.patch.object(shot_match, "get_resolve", lambda: resolve),
                         mock.patch.object(shot_match, "SkinFinder", NoSkin),
                         mock.patch.object(shot_match.time, "sleep", lambda s: None),
+                        # the synthetic shots differ by exposure only: correct all of it
+                        mock.patch.object(shot_match, "KEEP_LIGHT_FROM", float("inf")),
                         mock.patch.object(shot_match, "confirm_write", lambda *a: self.confirm)]
         self.confirm = True
         for p in self.patches:
