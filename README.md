@@ -57,7 +57,7 @@ Install it twice in
 
 | Saved as | Does |
 |---|---|
-| `Shot Match Preview.py` | prints the values, saves a CSV and a before/after contact sheet to `Documents/ShotMatch/`. Writes nothing into the grade |
+| `Shot Match Preview.py` | prints the values, saves a CSV and a before/after contact sheet to `Documents/ShotMatch/`. Writes nothing into the grade. On 21.1.2 it also tests the new `ExportFrame` on the hero (bit depth, switched-off nodes) and prints the result at the end |
 | `Shot Match Apply.py` | the same, then writes Gain into each shot's Linear node. The hero is left as it is |
 | `Shot Match Collect.py` | on a scene you matched by hand: measures what each Linear node does and saves it to `Documents/ShotMatch/collect_*/`. Writes nothing into the grade |
 

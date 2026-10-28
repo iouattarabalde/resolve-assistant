@@ -218,6 +218,33 @@ class ResolveFlowTest(unittest.TestCase):
             shot_match.run_in_resolve(apply=True)
         self.assertIn("CHECK FAILED", out.getvalue())
 
+    def test_export_frame_probe_compares_and_restores(self):
+        # The fake ExportFrame reuses the playhead export, so it honours the nodes the same way
+        resolve_project = shot_match.get_resolve().GetProjectManager().GetCurrentProject()
+
+        def export_frame(offset, options):
+            self.timeline.tc = shot_match.frames_to_tc(self.hero.GetStart() + offset, 24)
+            resolve_project.ExportCurrentFrameAsStill(options["filePath"])
+            return {"success": True}
+
+        self.hero.ExportFrame = export_frame
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            shot_match.run_in_resolve(apply=False)
+        text = out.getvalue()
+        self.assertEqual(text.count("median gap to the still 0.000 stop"), 2, text)
+        self.assertEqual(self.states["hero"][-2:], [{1: [True], 3: [True, False], 4: [False]},
+                                                    {1: [True], 3: [False, False], 4: [False]}])
+        for graph in self.hero.layers.values():
+            self.assertTrue(all(graph.enabled))
+
+    def test_export_frame_probe_skipped_on_older_resolve(self):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            shot_match.run_in_resolve(apply=False)
+        self.assertIn("ExportFrame test: not in this Resolve", out.getvalue())
+
+
     def test_apply_cancelled_writes_nothing(self):
         self.confirm = False
         shot_match.run_in_resolve(apply=True)
