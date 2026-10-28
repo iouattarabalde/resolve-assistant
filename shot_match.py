@@ -90,6 +90,7 @@ MIN_BIN_PIXELS = 200
 NEUTRAL_SCALE = 0.05       # chroma distance that doubles a group's weight
 KEEP_LIGHT_FROM = 0.5      # stops: beyond this, only part of the gap to the hero is closed
 KEEP_LIGHT_SHARE = 0.3     # share of the gap beyond KEEP_LIGHT_FROM that is corrected
+SKIN_WB_SHARE = 0.3       # share of the white balance taken from skin hue
 SKIN_WEIGHT = 0.1   # 0.4 until 2026-10-28; 0.1 scores best on the 4 bench scenes (56/60)
 MIN_SKIN_PIXELS = 300      # at 1/4 resolution
 KEEP_LIGHT = True          # False: close the whole gap to the hero, whatever its size
@@ -284,7 +285,15 @@ def solve(src, hero, src_skin, hero_skin) -> dict:
         exposure = surfaces + SKIN_WEIGHT * (skin - surfaces)
     exposure = keep_light(exposure)
     # Balancing before voting was tried: lower RMS, but 8/11 instead of 10/11 within 1/3 stop
-    gain = 2 ** exposure * white_balance(src, hero)
+    wb = white_balance(src, hero)
+    if not np.isnan(skin):
+        # Skin hue varies less between people than skin brightness does: on the 6 bench scenes
+        # pulling the balance this far towards the skin's cut the B/R error from 0.10 to 0.09 stop
+        skin_wb = np.median(hero_skin, 0) / np.median(src_skin, 0)
+        skin_wb = skin_wb / luma(skin_wb)
+        wb = wb * (skin_wb / wb) ** SKIN_WB_SHARE
+        wb = wb / luma(wb)
+    gain = 2 ** exposure * wb
     return {"gain": gain, "surfaces": surfaces, "skin": skin, "spread": float(votes.std()), "note": ""}
 
 
