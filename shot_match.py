@@ -677,13 +677,14 @@ def grade_switched_off(item, keep_linear: int | None = None):
 
 
 def export_ungraded_still(project, timeline, item, fps: int, path: Path, keep_linear: int | None = None,
-                          extras: bool = False) -> list[str]:
+                          extras: bool = False, whole_grade: bool = False) -> list[str]:
     """Middle frame of the clip with layers 3-4 and Post-Clip off, except the Linear node
     `keep_linear` when given (the hero's, so shots match the hero as graded). Returns problems.
     Uses TimelineItem.ExportFrame (21.1.2: no playhead move; on Shark 2026-10-28 it gave the
     same 16-bit image and honoured switched-off nodes), else the playhead and a still."""
     export = getattr(item, "ExportFrame", None)   # Resolve answers None for unknown names
-    with grade_switched_off(item, keep_linear) as problems:
+    switching = contextlib.nullcontext([]) if whole_grade else grade_switched_off(item, keep_linear)
+    with switching as problems:
         if callable(export):
             offset = (int(item.GetEnd()) - int(item.GetStart())) // 2
             result = export(offset, {"outputType": "file", "filePath": str(path)}) or {}
@@ -941,8 +942,10 @@ def measure_hero_node(project, timeline, hero, fps: int, node: int, graded: np.n
     return m
 
 
-def run_collect() -> int:
-    """Measure the Linear node of a scene matched by hand. Writes nothing to the grade."""
+def run_collect(final: bool = False) -> int:
+    """Measure the Linear node of a scene matched by hand. Writes nothing to the grade.
+    final: also save each clip with its whole grade on (final/), to see what the finished
+    grade lines up (faces, surfaces), not only the first pass."""
     resolve, project, timeline, fps, hero, clips = open_scene()
     clean_old_runs()
     resolve.OpenPage("color")
@@ -951,7 +954,9 @@ def run_collect() -> int:
     still_dir, graded_dir = out_dir / "stills", out_dir / "_graded"
     still_dir.mkdir(parents=True, exist_ok=True)
     graded_dir.mkdir()
-    print(f"Shot match COLLECT: {len(clips)} clips, hero {hero.GetName()}. "
+    if final:
+        (out_dir / "final").mkdir()
+    print(f"Shot match COLLECT{' FINAL' if final else ''}: {len(clips)} clips, hero {hero.GetName()}. "
           "Measures your Linear nodes; nothing is written to the grade.")
     truth, report, hero_name = {}, [], None
     try:
@@ -968,6 +973,9 @@ def run_collect() -> int:
             is_hero = item.GetUniqueId() == hero.GetUniqueId()
             problems = (export_ungraded_still(project, timeline, item, fps, off, extras=True)
                         + export_ungraded_still(project, timeline, item, fps, on, node, extras=is_hero))
+            if final:
+                problems += export_ungraded_still(project, timeline, item, fps, out_dir / "final" / f"{name}.tif",
+                                                  extras=True, whole_grade=True)
             m = measure_node(load_still(off), load_still(on)) if off.exists() and on.exists() else None
             if m is None:
                 problems.append("could not measure the Linear node")
@@ -1041,7 +1049,7 @@ def main(argv: list[str] | None = None) -> int:
         # folder. The Scripts menu does not set __file__, but the code object knows its file.
         stem = Path(main.__code__.co_filename).stem.lower()
         if "collect" in stem:
-            return run_collect()
+            return run_collect(final="final" in stem)
         return run_in_resolve(apply="apply" in stem)
     except Stop as stop:
         print(stop)

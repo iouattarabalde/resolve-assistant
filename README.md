@@ -60,6 +60,7 @@ Install it twice in
 | `Shot Match Preview.py` | prints the values, saves a CSV and a before/after contact sheet to `Documents/ShotMatch/`. Writes nothing into the grade. |
 | `Shot Match Apply.py` | the same, then writes Gain into each shot's Linear node. The hero is left as it is |
 | `Shot Match Collect.py` | on a scene you matched by hand: measures what each Linear node does and saves it to `Documents/ShotMatch/collect_*/`. Writes nothing into the grade |
+| `Shot Match Collect Final.py` | the same, on a finished scene, plus each clip with its whole grade on (`final/`), to see what the finished grade lines up. Writes nothing into the grade |
 
 The file decides from its own name : only a name containing "Apply" writes. Output appears in
 Workspace > Console; the first line says PREVIEW, APPLY or COLLECT.
