@@ -10,6 +10,7 @@
 # - Apply: the same, then Gain into each shot's Linear node through SetCDL, which has no layer argument
 #   and writes into the layer the node editor SHOWS. The hero is left as it is.
 # - Collect: on a scene matched by hand, measures each Linear node and zips stills + truth.json.
+# - Collect Final: the same, plus each clip exported with its whole grade on (final/).
 # MediaPipe is installed without its OpenCV, matplotlib and sounddevice dependencies (the segmenter
 # never uses them; OpenCV's full wheel carries an LGPL FFmpeg): the engine stubs them at import.
 import os
@@ -47,8 +48,8 @@ MANIFEST = {
         {"name": "MediaPipe selfie multiclass segmentation model", "licence": "Apache-2.0", "note": "Downloaded from Google on first use into ~/.shot_match."},
     ],
     "variables": [
-        {"id": "mode", "label": "Mode", "type": "choice", "default": "Preview", "choices": ["Preview", "Apply", "Collect"],
-         "help": "Preview and Collect write nothing into the grade. Apply writes Gain into each shot."},
+        {"id": "mode", "label": "Mode", "type": "choice", "default": "Preview", "choices": ["Preview", "Apply", "Collect", "Collect Final"],
+         "help": "Preview and both Collects write nothing into the grade. Apply writes Gain into each shot."},
         {"id": "layer", "label": "Layer of the Linear node", "type": "int", "default": 3, "min": 1, "max": 9, "pick": False},
         {"id": "node_label", "label": "Node label", "type": "text", "default": "Linear", "pick": False},
         {"id": "out_dir", "label": "Output folder", "type": "text", "default": "~/Documents/ShotMatch", "browse": "folder",
@@ -107,7 +108,7 @@ def _ensure_packages(ctx, rp, deps, tools):
 
 def run(ctx):
     v = ctx.vars
-    mode = v["mode"].lower()
+    mode = v["mode"].lower().replace(" ", "_")
     engine = os.path.join(os.path.dirname(os.path.abspath(__file__)), ENGINE)
     if not os.path.isfile(engine):
         raise ValueError("%s is missing: put it next to this script (%s)" % (ENGINE, os.path.dirname(engine)))

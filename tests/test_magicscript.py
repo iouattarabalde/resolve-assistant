@@ -72,6 +72,9 @@ class WrapperTest(unittest.TestCase):
         self.assertIn("--confirmed", self.args(apply))
         self.assertEqual(self.args(collect)[:2], ["--resolve", "collect"])
         self.assertNotIn("--confirmed", self.args(collect))
+        final = Ctx(str(self.kit), mode="Collect Final")
+        ms.run(final)
+        self.assertEqual(self.args(final)[:2], ["--resolve", "collect_final"])
 
     def test_engine_failure_is_raised_with_its_last_line(self):
         (self.kit / "Colour" / ms.ENGINE).write_text('print("Select the clips of the scene."); raise SystemExit(2)')
@@ -81,7 +84,7 @@ class WrapperTest(unittest.TestCase):
 
     def test_manifest_has_a_mode_choice_and_declares_its_packages(self):
         mode = next(v for v in ms.MANIFEST["variables"] if v["id"] == "mode")
-        self.assertEqual(mode["choices"], ["Preview", "Apply", "Collect"])
+        self.assertEqual(mode["choices"], ["Preview", "Apply", "Collect", "Collect Final"])
         self.assertTrue(ms.MANIFEST["destructive"])
         names = {t["name"] for t in ms.MANIFEST["third_party"]}
         self.assertTrue({"numpy", "tifffile", "pillow", "mediapipe"} <= names)

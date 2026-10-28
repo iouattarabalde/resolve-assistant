@@ -273,6 +273,23 @@ class ResolveFlowTest(unittest.TestCase):
         rms = float(re.search(r"RMS ([\d.]+)", stdout.getvalue()).group(1))
         self.assertLess(rms, 0.1)
 
+    def test_collect_final_saves_the_whole_grade(self):
+        self.give_export_frame()
+        with mock.patch.object(shot_match, "show_in_file_browser"):
+            shot_match.run_collect(final=True)
+        out = Path(self.tmp.name)
+        archive = next(out.glob("collect_*.zip"))
+        shutil.unpack_archive(archive, out / "u")
+        final = out / "u" / archive.stem / "final"
+        self.assertEqual(sorted(p.name for p in final.glob("*.tif")),
+                         ["01_hero.tif", "01_hero__f1.tif", "01_hero__f2.tif",
+                          "02_shot.tif", "02_shot__f1.tif", "02_shot__f2.tif"])
+        # The whole-grade exports switch nothing: every node on, as left by the colourist
+        self.assertEqual(self.states["shot"][-1], {1: [True], 3: [True, True], 4: [True]})
+        for item in (self.hero, self.shot):
+            for graph in item.layers.values():
+                self.assertTrue(all(graph.enabled))
+
     def test_export_frame_failure_falls_back_to_the_playhead(self):
         for item in (self.hero, self.shot):
             item.ExportFrame = lambda offset, options: {"success": False, "error": "nope"}
