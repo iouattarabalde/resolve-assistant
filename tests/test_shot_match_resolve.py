@@ -281,9 +281,11 @@ class ResolveFlowTest(unittest.TestCase):
         archive = next(out.glob("collect_*.zip"))
         shutil.unpack_archive(archive, out / "u")
         final = out / "u" / archive.stem / "final"
-        self.assertEqual(sorted(p.name for p in final.glob("*.tif")),
-                         ["01_hero.tif", "01_hero__f1.tif", "01_hero__f2.tif",
-                          "02_shot.tif", "02_shot__f1.tif", "02_shot__f2.tif"])
+        self.assertEqual(sorted(p.name for p in final.glob("*.tif")), ["01_hero.tif", "02_shot.tif"])
+        # Shrunk for upload: analysis size, lossless zlib
+        with tifffile.TiffFile(final / "02_shot.tif") as tif:
+            self.assertEqual(tif.pages[0].shape[1], 960)
+            self.assertEqual(tif.pages[0].compression, 8)   # ADOBE_DEFLATE (zlib)
         # The whole-grade exports switch nothing: every node on, as left by the colourist
         self.assertEqual(self.states["shot"][-1], {1: [True], 3: [True, True], 4: [True]})
         for item in (self.hero, self.shot):

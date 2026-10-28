@@ -1009,7 +1009,7 @@ def run_collect(final: bool = False) -> int:
                         + export_ungraded_still(project, timeline, item, fps, on, node, extras=is_hero))
             if final:
                 problems += export_ungraded_still(project, timeline, item, fps, out_dir / "final" / f"{name}.tif",
-                                                  extras=True, whole_grade=True)
+                                                  whole_grade=True)
             m = measure_node(load_still(off), load_still(on)) if off.exists() and on.exists() else None
             if m is None:
                 problems.append("could not measure the Linear node")
@@ -1039,11 +1039,23 @@ def run_collect(final: bool = False) -> int:
         offset = f"{o[0]:.2f} {o[1]:.2f} {o[2]:.2f}" if m["offset_used"] else "not used"
         say(f"  {name[:40]:40s}  {g[0]:.2f}  {g[1]:.2f}  {g[2]:.2f}    {y[0]:+.2f} {y[1]:+.2f} {y[2]:+.2f}    {offset}"
               + ("  (hero)" if name == hero_name else ""))
+    shrink_for_upload(out_dir)
     archive = Path(shutil.make_archive(str(out_dir), "zip", out_dir.parent, out_dir.name))
     shutil.rmtree(out_dir, ignore_errors=True)   # the zip holds it all
     say(f"\n  Saved: {archive}\n  Send that zip: it is one more scene to tune the solver on.")
     show_in_file_browser(archive)
     return 0
+
+
+def shrink_for_upload(folder: Path) -> None:
+    """Every still brought to EXTRA_SIZE (the solver analyses at about that size anyway) and
+    saved with lossless zlib compression: a zip about a tenth of the size, same values."""
+    for path in folder.rglob("*.tif"):
+        img = tifffile.imread(str(path))
+        if img.ndim == 3 and img.shape[0] in (3, 4) and img.shape[-1] not in (3, 4):
+            img = np.moveaxis(img, 0, -1)
+        step = max(1, round(max(img.shape[:2]) / EXTRA_SIZE))
+        tifffile.imwrite(str(path), np.ascontiguousarray(img[::step, ::step]), compression="zlib", predictor=2)
 
 
 def show_in_file_browser(path: Path) -> None:
