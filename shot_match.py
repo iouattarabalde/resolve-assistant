@@ -24,9 +24,9 @@ Scoring the solver against collected scenes:
 Offline, on stills already exported (one name containing HERO):
   python shot_match.py --stills FOLDER
 
-Solver (v05, tuned on two hand-matched scenes): exposure from surfaces both shots share
+Solver (v06, tuned on four hand-matched scenes): exposure from surfaces both shots share
 (pixels grouped by chromaticity, each group votes how many stops apart they are), pulled
-40 % towards skin when both frames show skin. Skin comes from MediaPipe's selfie
+10 % towards skin when both frames show skin. Skin comes from MediaPipe's selfie
 multiclass segmenter; without it, surfaces alone. White balance from the same groups.
 Shots of one camera angle (thumbnails alike) share one Gain unless the light moved, and
 shots are solved under the hero's own Gamma, measured from one extra hero export.
@@ -83,7 +83,7 @@ CLIP_MARGIN_DI = 0.015     # sensor clip differs per shot, so it is measured per
 GRIDS = [(b, s) for b in (16, 20, 24, 28, 32) for s in (0.0, 0.5)]
 MIN_BIN_PIXELS = 200
 NEUTRAL_SCALE = 0.05       # chroma distance that doubles a group's weight
-SKIN_WEIGHT = 0.4
+SKIN_WEIGHT = 0.1   # 0.4 until 2026-10-28; 0.1 scores best on the 4 bench scenes (56/60)
 MIN_SKIN_PIXELS = 300      # at 1/4 resolution
 SAME_ANGLE = 0.9           # thumbnail correlation above which two shots are one camera angle
 LIGHT_CHANGE_STOPS = 1 / 3 # a shot solved this far from its group keeps its own value
@@ -311,11 +311,18 @@ def fingerprint(encoded: np.ndarray) -> np.ndarray:
     return v / max(float(np.linalg.norm(v)), 1e-9)
 
 
+def camera_tag(name: str) -> str | None:
+    """Camera letter from names like CAMA_0043, CAM_B0090 or CAMC_0003, else None."""
+    found = re.search(r"CAM_?([A-Z])(?=[_\d])", name.upper())
+    return found.group(1) if found else None
+
+
 def group_by_angle(rows: list[dict], prints: dict, hero_gain=None) -> None:
     """One Gain per camera angle, as in a hand first pass. Shots whose thumbnails correlate
     above SAME_ANGLE (chained) form a group; each takes the group's median Gain, or the
     hero's own Gain when the hero is in it. A shot solved more than LIGHT_CHANGE_STOPS from
-    its group keeps its own value: the light moved."""
+    its group keeps its own value: the light moved. Two cameras named in the clip names
+    (CAMA, CAM_B...) are never one angle, however alike the thumbnails."""
     names = [r["clip"] for r in rows if r["gain"] is not None]
     group = {n: n for n in names}
 
@@ -325,6 +332,9 @@ def group_by_angle(rows: list[dict], prints: dict, hero_gain=None) -> None:
         return n
     for i, a in enumerate(names):
         for b in names[i + 1:]:
+            cams = camera_tag(a), camera_tag(b)
+            if None not in cams and cams[0] != cams[1]:
+                continue
             if float(prints[a] @ prints[b]) > SAME_ANGLE:
                 group[root(b)] = root(a)
     by_name = {r["clip"]: r for r in rows}

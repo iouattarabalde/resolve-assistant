@@ -108,6 +108,16 @@ class SolverTest(unittest.TestCase):
         self.assertAlmostEqual(gains["H1"], 0.6)   # the hero's angle takes the hero's own Gain
         self.assertEqual(gains["hero"], 1.0)
 
+    def test_two_named_cameras_are_never_one_angle(self):
+        a = np.ones(4) / 2
+        rows = [{"clip": "03_CAM_B0030_S001.MXF", "gain": np.full(3, 0.86), "note": ""},
+                {"clip": "04_CAMC_0003_S001.MP4", "gain": np.full(3, 2.25), "note": ""},
+                {"clip": "06_CAMC_0003_S002.MP4", "gain": np.full(3, 2.0), "note": ""}]
+        shot_match.group_by_angle(rows, {r["clip"]: a for r in rows})
+        notes = {r["clip"][:2]: r["note"] for r in rows}
+        self.assertEqual(notes["03"], "")
+        self.assertEqual(notes["04"], "angle 04, 06")
+
 
 class NoSkin:
     reason = "disabled in tests"
