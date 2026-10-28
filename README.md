@@ -57,7 +57,7 @@ Install it twice in
 
 | Saved as | Does |
 |---|---|
-| `Shot Match Preview.py` | prints the values, saves a CSV and a before/after contact sheet to `Documents/ShotMatch/`. Writes nothing into the grade. On 21.1.2 it also tests the new `ExportFrame` on the hero (bit depth, switched-off nodes) and prints the result at the end |
+| `Shot Match Preview.py` | prints the values, saves a CSV and a before/after contact sheet to `Documents/ShotMatch/`. Writes nothing into the grade. |
 | `Shot Match Apply.py` | the same, then writes Gain into each shot's Linear node. The hero is left as it is |
 | `Shot Match Collect.py` | on a scene you matched by hand: measures what each Linear node does and saves it to `Documents/ShotMatch/collect_*/`. Writes nothing into the grade |
 
@@ -85,7 +85,7 @@ python shot_match.py --bench FOLDER [FOLDER ...]    # solver vs hand, per shot a
 
 What it does to the project while it runs :
 
-- moves the playhead to the middle frame of each clip, and back where it was at the end;
+- exports the middle frame of each clip with `ExportFrame` (21.1.2), without moving the playhead; on older versions it moves the playhead there and back;
 - switches off every node of layers 3 and 4 and of the group Post-Clip graph (the hero's
   Linear node stays on), exports a still, then switches them back on. The API has no way to
   read whether a node was already off, so a node you had switched off yourself comes back on;

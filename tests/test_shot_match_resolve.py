@@ -90,7 +90,9 @@ class Project:
     def GetCurrentTimeline(self): return self.timeline
 
     def ExportCurrentFrameAsStill(self, path):
-        item = self.timeline.item_at_playhead()
+        return self.render(self.timeline.item_at_playhead(), path)
+
+    def render(self, item, path):
         # Record what was switched off at the moment of the export
         self.test.states.setdefault(item.name, []).append({l: list(g.enabled) for l, g in item.layers.items()})
         img = scene(1 if item is self.timeline.hero else 2, item.light, EVEN)
@@ -218,32 +220,29 @@ class ResolveFlowTest(unittest.TestCase):
             shot_match.run_in_resolve(apply=True)
         self.assertIn("CHECK FAILED", out.getvalue())
 
-    def test_export_frame_probe_compares_and_restores(self):
-        # The fake ExportFrame reuses the playhead export, so it honours the nodes the same way
-        resolve_project = shot_match.get_resolve().GetProjectManager().GetCurrentProject()
+    def test_export_frame_leaves_the_playhead_alone(self):
+        project = shot_match.get_resolve().GetProjectManager().GetCurrentProject()
+        moves = []
+        self.timeline.SetCurrentTimecode = lambda tc: moves.append(tc) or True
+        for item in (self.hero, self.shot):
+            # 21.1.2: renders the clip as its nodes are switched now, wherever the playhead is
+            item.ExportFrame = (lambda it: lambda offset, options: (
+                project.render(it, options["filePath"]), {"success": True})[1])(item)
+        shot_match.run_in_resolve(apply=True)
+        self.assertEqual(set(moves), {"01:00:00:00"}, "only the harmless put-back to where it was")
+        slope = np.array([float(v) for v in self.shot.cdl["Slope"].split()])
+        np.testing.assert_allclose(slope, 0.5, atol=0.04)
+        self.assertEqual(self.states["shot"][0], {1: [True], 3: [False, False], 4: [False]})
+        for item in (self.hero, self.shot):
+            for graph in item.layers.values():
+                self.assertTrue(all(graph.enabled))
 
-        def export_frame(offset, options):
-            self.timeline.tc = shot_match.frames_to_tc(self.hero.GetStart() + offset, 24)
-            resolve_project.ExportCurrentFrameAsStill(options["filePath"])
-            return {"success": True}
-
-        self.hero.ExportFrame = export_frame
-        out = io.StringIO()
-        with mock.patch("sys.stdout", out):
-            shot_match.run_in_resolve(apply=False)
-        text = out.getvalue()
-        self.assertEqual(text.count("median gap to the still 0.000 stop"), 2, text)
-        self.assertEqual(self.states["hero"][-2:], [{1: [True], 3: [True, False], 4: [False]},
-                                                    {1: [True], 3: [False, False], 4: [False]}])
-        for graph in self.hero.layers.values():
-            self.assertTrue(all(graph.enabled))
-
-    def test_export_frame_probe_skipped_on_older_resolve(self):
-        out = io.StringIO()
-        with mock.patch("sys.stdout", out):
-            shot_match.run_in_resolve(apply=False)
-        self.assertIn("ExportFrame test: not in this Resolve", out.getvalue())
-
+    def test_export_frame_failure_falls_back_to_the_playhead(self):
+        for item in (self.hero, self.shot):
+            item.ExportFrame = lambda offset, options: {"success": False, "error": "nope"}
+        shot_match.run_in_resolve(apply=False)
+        self.assertEqual(self.timeline.tc, "01:00:00:00")
+        self.assertEqual(len(self.states["shot"]), 1)
 
     def test_apply_cancelled_writes_nothing(self):
         self.confirm = False

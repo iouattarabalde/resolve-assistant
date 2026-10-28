@@ -582,47 +582,24 @@ def grade_switched_off(item, keep_linear: int | None = None):
 
 def export_ungraded_still(project, timeline, item, fps: int, path: Path, keep_linear: int | None = None) -> list[str]:
     """Middle frame of the clip with layers 3-4 and Post-Clip off, except the Linear node
-    `keep_linear` when given (the hero's, so shots match the hero as graded). Returns problems."""
-    mid = (int(item.GetStart()) + int(item.GetEnd())) // 2
-    if not timeline.SetCurrentTimecode(frames_to_tc(mid, fps)):
-        return ["could not move the playhead to the clip"]
+    `keep_linear` when given (the hero's, so shots match the hero as graded). Returns problems.
+    Uses TimelineItem.ExportFrame (21.1.2: no playhead move; on Shark 2026-10-28 it gave the
+    same 16-bit image and honoured switched-off nodes), else the playhead and a still."""
+    export = getattr(item, "ExportFrame", None)   # Resolve answers None for unknown names
     with grade_switched_off(item, keep_linear) as problems:
+        if callable(export):
+            offset = (int(item.GetEnd()) - int(item.GetStart())) // 2
+            result = export(offset, {"outputType": "file", "filePath": str(path)}) or {}
+            if result.get("success") and path.exists():
+                return problems
+        mid = (int(item.GetStart()) + int(item.GetEnd())) // 2
+        if not timeline.SetCurrentTimecode(frames_to_tc(mid, fps)):
+            problems.append("could not move the playhead to the clip")
+            return problems
         time.sleep(0.5)   # let the viewer re-render before grabbing it
         if not project.ExportCurrentFrameAsStill(str(path)) or not path.exists():
             problems.append("still export failed")
     return problems
-
-
-def probe_export_frame(item, keep_linear: int, graded: Path, ungraded: Path, folder: Path) -> None:
-    """21.1.2 added TimelineItem.ExportFrame, which needs no playhead move. Its docs do not say
-    whether it honours switched-off nodes or what bit depth a .tif gets, so check both against
-    the stills ExportCurrentFrameAsStill just made. Read only: the same nodes are switched as
-    for the capture, and switched back."""
-    export = getattr(item, "ExportFrame", None)
-    if not callable(export):
-        print("\n  ExportFrame test: not in this Resolve (needs 21.1.2).")
-        return
-    offset = (int(item.GetEnd()) - int(item.GetStart())) // 2
-    lines = []
-    for label, keep, reference in (("Linear on", keep_linear, graded), ("all off", None, ungraded)):
-        path = folder / f"_probe_{'on' if keep else 'off'}.tif"
-        started = time.time()
-        with grade_switched_off(item, keep) as problems:
-            result = export(offset, {"outputType": "file", "filePath": str(path)}) or {}
-        took = time.time() - started
-        if problems or not result.get("success") or not path.exists():
-            lines.append(f"    {label}: failed ({'; '.join(problems) or result.get('error') or 'no file'})")
-            continue
-        img, ref = tifffile.imread(str(path)), tifffile.imread(str(reference))
-        if img.shape[:2] != ref.shape[:2]:
-            lines.append(f"    {label}: {img.shape[1]}x{img.shape[0]} {img.dtype}, other size than the still "
-                         f"({ref.shape[1]}x{ref.shape[0]}), {took:.1f} s")
-            continue
-        a, b = (luma(decode_intermediate(load_still(x))) for x in (path, reference))
-        ok = (a > 1e-4) & (b > 1e-4)
-        gap = float(np.median(np.abs(np.log2(a[ok] / b[ok])))) if ok.any() else float("nan")
-        lines.append(f"    {label}: {img.dtype}, {took:.1f} s, median gap to the still {gap:.3f} stop")
-    print("\n  ExportFrame test (nothing written, for Claude):\n" + "\n".join(lines))
 
 
 def confirm_write(resolve, count: int, hero_name: str) -> bool:
@@ -822,12 +799,6 @@ def run_in_resolve(apply: bool = False) -> int:
                                       load_still(heroes[0][1]), still_dir / "_hero_off.tif")
         rows = match_stills([(s[0], s[1]) for s in stills], heroes[0][0], out_dir, hero_node)
         print_table(rows, hero_node)
-        if not apply and (still_dir / "_hero_off.tif").exists():
-            try:   # a test only: it must never stop the preview
-                probe_export_frame(hero, targets[heroes[0][0]][1], heroes[0][1],
-                                   still_dir / "_hero_off.tif", still_dir)
-            except Exception as error:
-                print(f"\n  ExportFrame test: failed ({error}).")
         if apply:
             count = sum(1 for r in rows if r["gain"] is not None and r["note"] != "hero" and r["clip"] in targets)
             if confirm_write(resolve, count, hero.GetName()):
