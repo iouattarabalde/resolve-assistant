@@ -549,7 +549,7 @@ def run_bench(folders: list[Path]) -> int:
 
 class Progress:
     """Prints how far a loop is and roughly how long is left, from the pace so far: at most
-    every PROGRESS_EVERY seconds, and when done. Flushed, so the Console shows it live."""
+    every PROGRESS_EVERY seconds, and when done."""
 
     def __init__(self, label: str, total: int):
         self.label, self.total, self.start, self.last = label, total, time.time(), time.time()
@@ -561,10 +561,19 @@ class Progress:
         self.last = now
         spent = now - self.start
         if done >= self.total:
-            print(f"  {self.label}: {self.total}/{self.total} done in {clock(spent)}", flush=True)
+            say(f"  {self.label}: {self.total}/{self.total} done in {clock(spent)}")
         else:
-            print(f"  {self.label}: {done}/{self.total}, about {clock(spent / done * (self.total - done))} left",
-                  flush=True)
+            say(f"  {self.label}: {done}/{self.total}, about {clock(spent / done * (self.total - done))} left")
+
+
+def say(text: str) -> None:
+    """print, flushed where the stream allows: Resolve's Console stream (fu_stdout) has no
+    flush and raises on print(..., flush=True)."""
+    print(text)
+    try:
+        sys.stdout.flush()
+    except AttributeError:
+        pass
 
 
 def clock(seconds: float) -> str:

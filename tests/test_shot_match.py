@@ -113,6 +113,22 @@ class SolverTest(unittest.TestCase):
         self.assertAlmostEqual(gains["H1"], 0.6)   # the hero's angle takes the hero's own Gain
         self.assertEqual(gains["hero"], 1.0)
 
+    def test_progress_prints_on_a_stream_without_flush(self):
+        class ResolveConsole:   # fu_stdout: write only
+            def __init__(self):
+                self.text = ""
+
+            def write(self, text):
+                self.text += text
+        console = ResolveConsole()
+        with mock.patch("sys.stdout", console):
+            progress = shot_match.Progress("Capture", 4)
+            progress.last -= 60
+            progress.step(1)
+            progress.step(4)
+        self.assertIn("Capture: 1/4, about", console.text)
+        self.assertIn("Capture: 4/4 done in", console.text)
+
     @mock.patch.object(shot_match, "KEEP_LIGHT_FROM", 0.5)
     def test_far_light_is_only_partly_corrected(self):
         self.assertEqual(shot_match.keep_light(0.4), 0.4)
