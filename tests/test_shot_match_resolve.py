@@ -47,7 +47,8 @@ class Item:
         self.name, self.start, self.light = name, start, light
         self.layers = {1: Graph(["Input"]), 3: Graph(["Linear", "Window"]), 4: Graph(["Scene"])}
         self.cdl = None
-        self.hand_gain, self.hand_power = np.ones(3), 1.0   # what the Linear node does when on
+        self.hand_gain, self.hand_power, self.hand_offset = np.ones(3), 1.0, 25.0   # Linear node by hand
+        self.honours_offset = 1   # 0: a Resolve that drops the CDL Offset
 
     def GetName(self): return self.name
     def GetUniqueId(self): return self.name
@@ -93,9 +94,15 @@ class Project:
         # Record what was switched off at the moment of the export
         self.test.states.setdefault(item.name, []).append({l: list(g.enabled) for l, g in item.layers.items()})
         img = scene(1 if item is self.timeline.hero else 2, item.light, EVEN)
-        if item.layers[3].enabled[0]:   # the Linear node: Gain then Gamma, in linear
+        if item.layers[3].enabled[0]:   # the Linear node, in linear: written CDL, else the hand values
             lin = shot_match.decode_intermediate(img / 65535.0)
-            img = (np.clip(encode(np.maximum(lin * item.hand_gain, 1e-6) ** item.hand_power), 0, 1) * 65535).astype(np.uint16)
+            if item.cdl:
+                slope, offset, power = (np.array([float(v) for v in item.cdl[k].split()])
+                                        for k in ("Slope", "Offset", "Power"))
+                offset = offset * item.honours_offset
+            else:
+                slope, offset, power = item.hand_gain, (item.hand_offset - 25) * 0.0073, item.hand_power
+            img = (np.clip(encode(np.maximum(lin * slope + offset, 1e-6) ** power), 0, 1) * 65535).astype(np.uint16)
         tifffile.imwrite(path, img)
         return True
 
@@ -172,7 +179,7 @@ class ResolveFlowTest(unittest.TestCase):
         shot_match.run_in_resolve(apply=True)
         self.assertIsNone(self.hero.cdl)
         self.assertEqual(self.shot.cdl["NodeIndex"], "1")
-        self.assertEqual(self.shot.cdl["Offset"], "0.0000 0.0000 0.0000")
+        self.assertEqual(self.shot.cdl["Offset"], "0.00000 0.00000 0.00000")
         slope = np.array([float(v) for v in self.shot.cdl["Slope"].split()])
         np.testing.assert_allclose(slope, 0.5, atol=0.04)
 
@@ -193,6 +200,23 @@ class ResolveFlowTest(unittest.TestCase):
         shutil.unpack_archive(archive, Path(self.tmp.name) / "u")
         truth = json.loads((Path(self.tmp.name) / "u" / archive.stem / "truth.json").read_text())
         self.assertFalse(any(m["offset_used"] for m in truth["clips"].values()))
+
+    def test_apply_writes_the_hero_offset_and_checks_the_image(self):
+        self.hero.hand_gain, self.hero.hand_offset = np.array([0.6, 0.6, 0.6]), 23.5
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            shot_match.run_in_resolve(apply=True)
+        offset = np.array([float(v) for v in self.shot.cdl["Offset"].split()])
+        np.testing.assert_allclose(offset, -1.5 * 0.0073, atol=0.002)
+        self.assertIn("written nodes do what was intended", out.getvalue())
+
+    def test_apply_check_catches_a_dropped_offset(self):
+        self.hero.hand_gain, self.hero.hand_offset = np.array([0.6, 0.6, 0.6]), 22.0
+        self.shot.honours_offset = 0
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            shot_match.run_in_resolve(apply=True)
+        self.assertIn("CHECK FAILED", out.getvalue())
 
     def test_apply_cancelled_writes_nothing(self):
         self.confirm = False

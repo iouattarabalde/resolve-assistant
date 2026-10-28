@@ -623,15 +623,15 @@ def confirm_write(resolve, count: int, hero_name: str) -> bool:
     return answer["write"]
 
 
-def write_gains(rows: list[dict], targets: dict, out_dir: Path, hero_node: dict | None = None) -> None:
-    """Gain into each shot's Linear node through SetCDL. Tested on 21.1: Slope lands on Gain
-    R/G/B one to one, but a CDL Offset is folded into Gain, so Offset stays 0 and the hero's
-    Offset, when it has one, is left for the colourist to dial. Power carries the hero's
-    Gamma exponent (1 when the hero has none): NOT YET CHECKED that Resolve puts
-    it on the Gamma wheel with the calibrated law. SetCDL replaces the node's wheels:
-    hand-set Lift, Gamma or Gain in that node are lost. SetCDL has no layer argument and
-    writes into the layer the node editor is SHOWING (seen on 21.1: run from layer 4, it
-    wrote node 1 of layer 4)."""
+def write_gains(rows: list[dict], targets: dict, out_dir: Path, hero_node: dict | None = None) -> list[str]:
+    """Each shot's Linear node through SetCDL: the solved Gain as Slope, the hero's Offset as
+    CDL Offset (linear) and its Gamma exponent as Power, so a shot gets the hero's Offset and
+    Gamma with its own Gain. Seen on 21.1: Slope lands on Gain R/G/B one to one, and a CDL
+    Offset does not move the Offset wheel (Resolve spreads it over other wheels), so which
+    wheels show it is Resolve's business: verify_written() checks the result on the image.
+    SetCDL replaces the node's wheels and has no layer argument: it writes into the layer the
+    node editor is SHOWING (seen on 21.1: run from layer 4, it wrote node 1 of layer 4).
+    Returns the clips written."""
     power, lift = node_parts(hero_node)
     written, failed = [], []
     for r in rows:
@@ -640,17 +640,51 @@ def write_gains(rows: list[dict], targets: dict, out_dir: Path, hero_node: dict 
         item, node = targets[r["clip"]]
         g = r["gain"]
         cdl = {"NodeIndex": str(node), "Slope": f"{g[0]:.4f} {g[1]:.4f} {g[2]:.4f}",
-               "Offset": "0.0000 0.0000 0.0000", "Power": f"{power[0]:.4f} {power[1]:.4f} {power[2]:.4f}",
-               "Saturation": "1.0000"}
+               "Offset": f"{lift[0]:.5f} {lift[1]:.5f} {lift[2]:.5f}",
+               "Power": f"{power[0]:.4f} {power[1]:.4f} {power[2]:.4f}", "Saturation": "1.0000"}
         (written if item.SetCDL(cdl) else failed).append(r["clip"])
     with open(out_dir / "written.txt", "w") as f:
-        f.write("Gain written to the Linear node (layer 3) of:\n" + "\n".join(written) + "\n")
+        f.write("Written to the Linear node (layer 3) of:\n" + "\n".join(written) + "\n")
         if failed:
             f.write("\nSetCDL refused:\n" + "\n".join(failed) + "\n")
     print(f"\n  Written: {len(written)} clips." + (f" REFUSED: {', '.join(failed)}" if failed else ""))
-    if lift.any():
-        offset = " ".join(f"{25 + v / OFFSET_STEP:.2f}" for v in lift)
-        print(f"  The hero's Offset ({offset}) cannot be written by script: dial it on these shots by hand.")
+    return written
+
+
+def verify_written(project, timeline, fps: int, rows: list[dict], targets: dict, stills: dict,
+                   hero_node: dict | None, still_dir: Path) -> None:
+    """Exports each written shot with only its Linear node on and compares it with what the
+    node should do to the Linear-off still already taken: Gain, then the hero's Offset and
+    Gamma. A gap over 0.05 stop means Resolve did not put the values where intended."""
+    power, lift = node_parts(hero_node)
+    start_tc, gaps, bad = timeline.GetCurrentTimecode(), [], []
+    try:
+        for r in rows:
+            if r["clip"] not in targets or r["clip"] not in stills or r["note"] == "hero" or r["gain"] is None:
+                continue
+            item, node = targets[r["clip"]]
+            path = still_dir / f"_check_{r['clip']}.tif"
+            export_ungraded_still(project, timeline, item, fps, path, node)
+            if not path.exists():
+                bad.append(f"{r['clip']}: could not export it to check")
+                continue
+            off = load_still(stills[r["clip"]])[::ANALYSIS_STEP, ::ANALYSIS_STEP].reshape(-1, 3)
+            on = load_still(path)[::ANALYSIS_STEP, ::ANALYSIS_STEP].reshape(-1, 3)
+            ok = ((off < off.max(0) - CLIP_MARGIN_DI).all(1) & (on < on.max(0) - CLIP_MARGIN_DI).all(1)
+                  & (off.min(1) > 2 * DI_LOG_CUT))
+            expected = np.maximum(decode_intermediate(off[ok]) * r["gain"] + lift, 1e-6) ** power
+            got = np.maximum(decode_intermediate(on[ok]), 1e-6)
+            gap = float(np.median(np.abs(np.log2(luma(got) / np.maximum(luma(expected), 1e-6)))))
+            gaps.append(gap)
+            if gap > 0.05:
+                bad.append(f"{r['clip']}: {gap:.2f} stop from what was intended")
+    finally:
+        timeline.SetCurrentTimecode(start_tc)
+    if bad:
+        print("  CHECK FAILED, the written nodes do not do what was intended:\n    " + "\n    ".join(bad))
+    elif gaps:
+        print(f"  Checked {len(gaps)} shots on the image: the written nodes do what was intended "
+              f"(within {max(gaps):.2f} stop).")
 
 
 def clean_old_runs(now: datetime.datetime | None = None) -> None:
@@ -751,6 +785,8 @@ def run_in_resolve(apply: bool = False) -> int:
             count = sum(1 for r in rows if r["gain"] is not None and r["note"] != "hero" and r["clip"] in targets)
             if confirm_write(resolve, count, hero.GetName()):
                 write_gains(rows, targets, out_dir, hero_node)
+                verify_written(project, timeline, fps, rows, targets,
+                               {name: path for name, path, _ in stills}, hero_node, still_dir)
             else:
                 print("\n  Cancelled: nothing written.")
     finally:

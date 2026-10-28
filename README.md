@@ -113,9 +113,11 @@ Shots of one camera angle get one Gain, as in a hand first pass: shots whose thu
 correlate above 0.9 form a group and take its median Gain, or the hero's own Gain when the
 hero is in it. A shot solved more than ⅓ stop from its group keeps its own value (the light
 moved). The hero is also exported with its Linear node off, to measure its Gain, Gamma and Offset:
-shots are solved under the hero's Gamma and Offset. Apply writes that Gamma with the Gain
-(as CDL Power; not yet checked on the wheels in Resolve). It cannot write Offset (`SetCDL`
-folds it into Gain), so when the hero has one, Apply prints it to dial by hand.
+shots are solved under the hero's Gamma and Offset. Apply writes all three through
+`SetCDL`: the shot's Gain as Slope, the hero's Offset as CDL Offset, its Gamma as Power.
+Which wheels Resolve shows them on is up to Resolve (a CDL Offset does not move the Offset
+wheel), so after writing, Apply exports each shot with only its Linear node on and checks
+on the image that the node does what was intended; a gap over 0.05 stop is reported.
 
 Bench, three scenes and 32 shots matched by hand : 31 within ⅓ stop, exposure error RMS
 0.18 stop, white balance RMS 0.07 stop.
