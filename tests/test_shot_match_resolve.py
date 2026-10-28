@@ -222,14 +222,28 @@ class ResolveFlowTest(unittest.TestCase):
             shot_match.run_in_resolve(apply=True)
         self.assertIn("CHECK FAILED", out.getvalue())
 
-    def test_export_frame_leaves_the_playhead_alone(self):
+    def give_export_frame(self):
+        """21.1.2: renders the clip as its nodes are switched now, wherever the playhead is;
+        maxDimension shrinks it."""
         project = shot_match.get_resolve().GetProjectManager().GetCurrentProject()
+
+        def make(item):
+            def export_frame(offset, options):
+                path = options["filePath"]
+                project.render(item, path)
+                if options.get("maxDimension"):
+                    img = tifffile.imread(path)
+                    step = img.shape[1] // options["maxDimension"]
+                    tifffile.imwrite(path, img[::step, ::step])
+                return {"success": True}
+            return export_frame
+        for item in (self.hero, self.shot):
+            item.ExportFrame = make(item)
+
+    def test_export_frame_leaves_the_playhead_alone(self):
         moves = []
         self.timeline.SetCurrentTimecode = lambda tc: moves.append(tc) or True
-        for item in (self.hero, self.shot):
-            # 21.1.2: renders the clip as its nodes are switched now, wherever the playhead is
-            item.ExportFrame = (lambda it: lambda offset, options: (
-                project.render(it, options["filePath"]), {"success": True})[1])(item)
+        self.give_export_frame()
         shot_match.run_in_resolve(apply=True)
         self.assertEqual(set(moves), {"01:00:00:00"}, "only the harmless put-back to where it was")
         slope = np.array([float(v) for v in self.shot.cdl["Slope"].split()])
@@ -238,6 +252,26 @@ class ResolveFlowTest(unittest.TestCase):
         for item in (self.hero, self.shot):
             for graph in item.layers.values():
                 self.assertTrue(all(graph.enabled))
+
+    def test_collect_saves_extra_frames_and_the_solver_uses_them(self):
+        self.give_export_frame()
+        self.shot.hand_gain = np.full(3, 0.5)
+        with mock.patch.object(shot_match, "show_in_file_browser"):
+            shot_match.run_collect()
+        out = Path(self.tmp.name)
+        archive = next(out.glob("collect_*.zip"))
+        shutil.unpack_archive(archive, out / "u")
+        folder = out / "u" / archive.stem
+        names = sorted(p.name for p in folder.rglob("*.tif"))
+        self.assertEqual(names, ["01_hero.tif", "01_hero__f1.tif", "01_hero__f2.tif", "02_shot.tif",
+                                 "02_shot__f1.tif", "02_shot__f2.tif", "hero_graded.tif",
+                                 "hero_graded__f1.tif", "hero_graded__f2.tif"])
+        self.assertEqual(tifffile.imread(folder / "stills" / "02_shot__f1.tif").shape[1], 960)
+        stdout = io.StringIO()
+        with mock.patch("sys.stdout", stdout):
+            shot_match.run_bench([folder])
+        rms = float(re.search(r"RMS ([\d.]+)", stdout.getvalue()).group(1))
+        self.assertLess(rms, 0.1)
 
     def test_export_frame_failure_falls_back_to_the_playhead(self):
         for item in (self.hero, self.shot):

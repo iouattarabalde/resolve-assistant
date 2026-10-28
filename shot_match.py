@@ -80,6 +80,9 @@ DWG_TO_709 = np.array([[1.8986149, -0.79217618, -0.10643872],
                        [-0.12153916, -0.31567585, 1.43721501]])
 
 ANALYSIS_STEP = 2
+PROGRESS_EVERY = 10        # seconds between progress lines in the Console
+EXTRA_FRAMES = (0.2, 0.8)  # more frames per clip, as fractions of its length (the middle is the main one)
+EXTRA_SIZE = 960           # longer edge of the extra frames, pixels
 CLIP_MARGIN_DI = 0.015     # sensor clip differs per shot, so it is measured per still
 GRIDS = [(b, s) for b in (16, 20, 24, 28, 32) for s in (0.0, 0.5)]
 MIN_BIN_PIXELS = 200
@@ -128,9 +131,9 @@ def sky_mask(lin):
     return np.cumprod(candidate, axis=0).astype(bool)
 
 
-def analysis_pixels(encoded):
+def analysis_pixels(encoded, step: int = ANALYSIS_STEP):
     """Linear pixels worth comparing: not clipped, above the noise floor, no sky."""
-    small = encoded[::ANALYSIS_STEP, ::ANALYSIS_STEP]
+    small = encoded[::step, ::step]
     lin = decode_intermediate(small)
     clip = small.reshape(-1, 3).max(axis=0) - CLIP_MARGIN_DI
     valid = (small < clip).all(axis=-1) & (small.min(axis=-1) > 0.005)
@@ -167,10 +170,10 @@ class SkinFinder:
         except Exception as exc:  # a missing model or GPU library must not stop the match
             self.reason = f"skin model unavailable ({exc})"
 
-    def pixels(self, encoded):
+    def pixels(self, encoded, step: int = 4):
         if self.segmenter is None:
             return np.empty((0, 3))
-        small = encoded[::4, ::4]
+        small = encoded[::step, ::step]
         lin = decode_intermediate(small)
         rgb = np.ascontiguousarray((preview(lin) * 255).astype(np.uint8))
         image = self.mp.Image(image_format=self.mp.ImageFormat.SRGB, data=rgb)
@@ -278,6 +281,15 @@ def node_parts(node: dict | None):
     return np.asarray(node.get("power", [1, 1, 1]), float), node_lift(node.get("offset"))
 
 
+def extra_paths(path: Path) -> list[Path]:
+    """The extra frames saved next to a still: NAME__f1.tif, NAME__f2.tif..."""
+    return sorted(path.parent.glob(glob_escape(path.stem) + "__f*.tif"))
+
+
+def glob_escape(text: str) -> str:
+    return re.sub(r"([\[\]*?])", r"[\1]", text)
+
+
 def match_stills(stills: list[tuple[str, Path]], hero_name: str, out_dir: Path,
                  hero_node: dict | None = None) -> list[dict]:
     """stills: (clip name, still path), the hero as graded. Writes match_values.csv and
@@ -289,22 +301,39 @@ def match_stills(stills: list[tuple[str, Path]], hero_name: str, out_dir: Path,
     if skin_finder.reason:
         print(f"  Skin: off, {skin_finder.reason}. Matching on surfaces only.")
     encoded = {name: load_still(path) for name, path in stills}
-    hero_enc = encoded[hero_name]
-    hero_px, hero_skin = analysis_pixels(hero_enc), skin_finder.pixels(hero_enc)
+
+    def pooled(name, path):
+        """Surface and skin pixels of the main frame and of its extra frames, if any."""
+        extras = [load_still(x) for x in extra_paths(path)]
+        if not extras:
+            enc = encoded[name]
+            return analysis_pixels(enc), skin_finder.pixels(enc)
+        # Extra frames are smaller: bring the main one to their size so each frame counts alike
+        factor = max(1, round(encoded[name].shape[1] / extras[0].shape[1]))
+        frames = [encoded[name][::factor, ::factor]] + extras
+        step, skin_step = max(1, ANALYSIS_STEP // factor), max(1, 4 // factor)
+        return (np.concatenate([analysis_pixels(f, step) for f in frames]),
+                np.concatenate([skin_finder.pixels(f, skin_step) for f in frames]))
+    paths = dict(stills)
+    hero_px, hero_skin = pooled(hero_name, paths[hero_name])
     power, lift = node_parts(hero_node)
     if not (np.allclose(power, 1, atol=0.005) and not lift.any()):
         def before_node(px):
             return np.maximum(px ** (1 / power) - lift, 1e-6)
         hero_px, hero_skin = before_node(hero_px), before_node(hero_skin)
     rows, sheet = [], []
-    for name, _ in stills:
+    progress = Progress("Solve", len(stills))
+    for done, (name, _) in enumerate(stills):
+        if done:
+            progress.step(done)
         if name == hero_name:
             r = {"gain": np.ones(3), "surfaces": 0.0, "skin": np.nan, "spread": 0.0, "note": "hero"}
         else:
-            enc = encoded[name]
-            r = solve(analysis_pixels(enc), hero_px, skin_finder.pixels(enc), hero_skin)
+            px, skin = pooled(name, paths[name])
+            r = solve(px, hero_px, skin, hero_skin)
         r["clip"] = name
         rows.append(r)
+    progress.step(len(stills))
     skin_finder.close()
     group_by_angle(rows, {name: fingerprint(enc) for name, enc in encoded.items()},
                    hero_node["gain"] if hero_node else None)
@@ -518,6 +547,31 @@ def run_bench(folders: list[Path]) -> int:
     return 0
 
 
+class Progress:
+    """Prints how far a loop is and roughly how long is left, from the pace so far: at most
+    every PROGRESS_EVERY seconds, and when done. Flushed, so the Console shows it live."""
+
+    def __init__(self, label: str, total: int):
+        self.label, self.total, self.start, self.last = label, total, time.time(), time.time()
+
+    def step(self, done: int) -> None:
+        now = time.time()
+        if done < self.total and now - self.last < PROGRESS_EVERY:
+            return
+        self.last = now
+        spent = now - self.start
+        if done >= self.total:
+            print(f"  {self.label}: {self.total}/{self.total} done in {clock(spent)}", flush=True)
+        else:
+            print(f"  {self.label}: {done}/{self.total}, about {clock(spent / done * (self.total - done))} left",
+                  flush=True)
+
+
+def clock(seconds: float) -> str:
+    seconds = int(round(seconds))
+    return f"{seconds // 60} min {seconds % 60:02d} s" if seconds >= 60 else f"{seconds} s"
+
+
 class Stop(Exception):
     """A plain-language reason to stop, printed as is."""
 
@@ -604,7 +658,8 @@ def grade_switched_off(item, keep_linear: int | None = None):
                 problems.append(f"COULD NOT SWITCH {where} NODE {i} ({label}) BACK ON, switch it on by hand")
 
 
-def export_ungraded_still(project, timeline, item, fps: int, path: Path, keep_linear: int | None = None) -> list[str]:
+def export_ungraded_still(project, timeline, item, fps: int, path: Path, keep_linear: int | None = None,
+                          extras: bool = False) -> list[str]:
     """Middle frame of the clip with layers 3-4 and Post-Clip off, except the Linear node
     `keep_linear` when given (the hero's, so shots match the hero as graded). Returns problems.
     Uses TimelineItem.ExportFrame (21.1.2: no playhead move; on Shark 2026-10-28 it gave the
@@ -615,6 +670,12 @@ def export_ungraded_still(project, timeline, item, fps: int, path: Path, keep_li
             offset = (int(item.GetEnd()) - int(item.GetStart())) // 2
             result = export(offset, {"outputType": "file", "filePath": str(path)}) or {}
             if result.get("success") and path.exists():
+                # More frames of the clip, smaller, so one odd moment weighs less (ExportFrame only)
+                length = int(item.GetEnd()) - int(item.GetStart())
+                for k, at in enumerate(EXTRA_FRAMES if extras else (), 1):
+                    extra = path.with_name(f"{path.stem}__f{k}.tif")
+                    export(int(length * at), {"outputType": "file", "filePath": str(extra),
+                                              "maxDimension": EXTRA_SIZE})
                 return problems
         mid = (int(item.GetStart()) + int(item.GetEnd())) // 2
         if not timeline.SetCurrentTimecode(frames_to_tc(mid, fps)):
@@ -795,7 +856,10 @@ def run_in_resolve(apply: bool = False) -> int:
 
     stills, report, targets = [], [], {}
     try:
+        progress = Progress("Capture", len(clips))
         for n, item in enumerate(sorted(clips, key=lambda c: c.GetStart()), 1):
+            if n > 1:
+                progress.step(n - 1)
             name = f"{n:02d}_{item.GetName()}"
             node = linear_node(item)
             if node is None:
@@ -803,12 +867,14 @@ def run_in_resolve(apply: bool = False) -> int:
                 continue
             path = still_dir / f"{name}.tif"
             is_hero = item.GetUniqueId() == hero.GetUniqueId()
-            problems = export_ungraded_still(project, timeline, item, fps, path, node if is_hero else None)
+            problems = export_ungraded_still(project, timeline, item, fps, path, node if is_hero else None,
+                                             extras=True)
             report.append(f"  {name}: Linear is node {node} of layer {LINEAR_LAYER}"
                           + (f"; {'; '.join(problems)}" if problems else ""))
             if path.exists():
                 stills.append((name, path, is_hero))
                 targets[name] = (item, node)
+        progress.step(len(clips))
     finally:
         timeline.SetCurrentTimecode(start_tc)
     print("\n".join(report))
@@ -818,7 +884,10 @@ def run_in_resolve(apply: bool = False) -> int:
         if not heroes:
             raise Stop("No still of the hero, so nothing to match against. See the lines above.")
         sample = tifffile.imread(str(heroes[0][1]))
-        print(f"\n  Still format: {sample.shape[1]}x{sample.shape[0]}, {sample.dtype}")
+        extra = [tifffile.imread(str(x)) for x in extra_paths(heroes[0][1])]
+        extra_format = (f"; {len(extra)} more frames a clip, {extra[0].shape[1]}x{extra[0].shape[0]}, "
+                        f"{extra[0].dtype}" if extra else "")
+        print(f"\n  Still format: {sample.shape[1]}x{sample.shape[0]}, {sample.dtype}{extra_format}")
         hero_node = measure_hero_node(project, timeline, hero, fps, targets[heroes[0][0]][1],
                                       load_still(heroes[0][1]), still_dir / "_hero_off.tif")
         rows = match_stills([(s[0], s[1]) for s in stills], heroes[0][0], out_dir, hero_node)
@@ -868,26 +937,33 @@ def run_collect() -> int:
           "Measures your Linear nodes; nothing is written to the grade.")
     truth, report, hero_name = {}, [], None
     try:
+        progress = Progress("Capture", len(clips))
         for n, item in enumerate(sorted(clips, key=lambda c: c.GetStart()), 1):
+            if n > 1:
+                progress.step(n - 1)
             name = f"{n:02d}_{item.GetName()}"
             node = linear_node(item)
             if node is None:
                 report.append(f"  {name}: skipped, needs exactly one node labelled Linear in layer {LINEAR_LAYER}")
                 continue
             off, on = still_dir / f"{name}.tif", graded_dir / f"{name}.tif"
-            problems = (export_ungraded_still(project, timeline, item, fps, off)
-                        + export_ungraded_still(project, timeline, item, fps, on, node))
+            is_hero = item.GetUniqueId() == hero.GetUniqueId()
+            problems = (export_ungraded_still(project, timeline, item, fps, off, extras=True)
+                        + export_ungraded_still(project, timeline, item, fps, on, node, extras=is_hero))
             m = measure_node(load_still(off), load_still(on)) if off.exists() and on.exists() else None
             if m is None:
                 problems.append("could not measure the Linear node")
             else:
                 truth[name] = m
-                if item.GetUniqueId() == hero.GetUniqueId():
+                if is_hero:
                     hero_name = name
                     on.replace(out_dir / "hero_graded.tif")
+                    for k, extra in enumerate(extra_paths(on), 1):
+                        extra.replace(out_dir / f"hero_graded__f{k}.tif")
                 if m["misfit_stops"] > 0.1:
                     problems.append("the node does more than Gain, Gamma and Offset (curves?): values are approximate")
             report.append(f"  {name}: " + ("; ".join(problems) if problems else "measured"))
+        progress.step(len(clips))
     finally:
         timeline.SetCurrentTimecode(start_tc)
         for leftover in graded_dir.glob("*.tif"):

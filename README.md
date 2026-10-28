@@ -85,7 +85,8 @@ python shot_match.py --bench FOLDER [FOLDER ...]    # solver vs hand, per shot a
 
 What it does to the project while it runs :
 
-- exports the middle frame of each clip with `ExportFrame` (21.1.2), without moving the playhead; on older versions it moves the playhead there and back;
+- exports the middle frame of each clip with `ExportFrame` (21.1.2), without moving the playhead, plus two smaller frames (at 20 % and 80 % of the clip) that the solver pools with it; on older versions it moves the playhead to the middle frame only, and back;
+- prints its progress and the time left in the Console every 10 s;
 - switches off every node of layers 3 and 4 and of the group Post-Clip graph (the hero's
   Linear node stays on), exports a still, then switches them back on. The API has no way to
   read whether a node was already off, so a node you had switched off yourself comes back on;

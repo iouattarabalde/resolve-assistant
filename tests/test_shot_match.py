@@ -133,7 +133,7 @@ class SolverTest(unittest.TestCase):
 class NoSkin:
     reason = "disabled in tests"
 
-    def pixels(self, encoded):
+    def pixels(self, encoded, step=4):
         return np.empty((0, 3))
 
     def close(self):
