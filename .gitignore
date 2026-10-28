@@ -16,3 +16,4 @@ qc_reports/
 # Shot match output: stills of client footage
 _shot_match/
 ShotMatch/
+dist/

@@ -280,6 +280,26 @@ class ResolveFlowTest(unittest.TestCase):
         self.assertEqual(self.timeline.tc, "01:00:00:00")
         self.assertEqual(len(self.states["shot"]), 1)
 
+    def test_magicscript_command_line_applies_without_the_window_on_its_layer_and_label(self):
+        # MagicScript runs the engine as `--resolve apply --confirmed` with its dialog's settings
+        self.confirm = False                     # the engine's own window would say no
+        for item in (self.hero, self.shot):
+            item.layers = {1: Graph(["Input"]), 2: Graph(["Lin"]), 3: Graph(["Window"]), 4: Graph(["Scene"])}
+        globals_now = {k: getattr(shot_match, k) for k in
+                       ("LINEAR_LAYER", "LINEAR_LABEL", "OUT_ROOT", "KEEP_LIGHT", "CAPTURE_OFF_LAYERS")}
+        try:
+            code = shot_match.main(["--resolve", "apply", "--confirmed", "--layer", "2", "--label", "Lin",
+                                    "--out", self.tmp.name])
+        finally:
+            for k, val in globals_now.items():
+                setattr(shot_match, k, val)
+        self.assertEqual(code, 0)
+        self.assertIsNone(self.hero.cdl)
+        self.assertEqual(self.shot.cdl["NodeIndex"], "1")   # node 1 of layer 2, the one labelled Lin
+        slope = np.array([float(v) for v in self.shot.cdl["Slope"].split()])
+        np.testing.assert_allclose(slope, 0.5, atol=0.05)
+        self.assertTrue(all(self.shot.layers[3].enabled + self.shot.layers[4].enabled))
+
     def test_apply_cancelled_writes_nothing(self):
         self.confirm = False
         shot_match.run_in_resolve(apply=True)
