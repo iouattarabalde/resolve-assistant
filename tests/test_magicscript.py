@@ -82,6 +82,27 @@ class WrapperTest(unittest.TestCase):
             ms.run(Ctx(str(self.kit)))
         self.assertEqual(str(err.exception), "Select the clips of the scene.")
 
+    def test_stream_deck_run_shows_the_lines_in_a_window_inside_resolve(self):
+        # magicscript_run.py gives no pump and writes the log only at the end
+        box, shown = [], []
+        win = mock.Mock(GetItems=lambda: {"log": mock.Mock(Append=box.append)},
+                        Show=lambda: shown.append(True), Hide=lambda: shown.append(False))
+        bmd = mock.Mock(UIDispatcher=lambda ui: mock.Mock(AddWindow=lambda *a: win))
+        ctx = Ctx(str(self.kit))
+        ctx.fusion = mock.Mock()
+        with mock.patch.dict(sys.modules, {"DaVinciResolveScript": bmd}):
+            ms.run(ctx)
+        self.assertIn("  Values and contact sheet: somewhere", box)
+        self.assertEqual(shown, [True, False])
+
+    def test_window_run_opens_no_extra_window(self):
+        bmd = mock.Mock()
+        ctx = Ctx(str(self.kit))
+        ctx._pump = lambda: None
+        with mock.patch.dict(sys.modules, {"DaVinciResolveScript": bmd}):
+            ms.run(ctx)
+        bmd.UIDispatcher.assert_not_called()
+
     def test_manifest_has_a_mode_choice_and_declares_its_packages(self):
         mode = next(v for v in ms.MANIFEST["variables"] if v["id"] == "mode")
         self.assertEqual(mode["choices"], ["Preview", "Apply", "Collect", "Collect Final"])

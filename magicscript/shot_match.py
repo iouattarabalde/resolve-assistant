@@ -106,6 +106,44 @@ def _ensure_packages(ctx, rp, deps, tools):
         raise RuntimeError("The packages installed but do not import: " + (p.stderr or "").strip()[-400:])
 
 
+class _LiveWindow:
+    """Progress window inside Resolve for runs started from the Stream Deck or the command line:
+    magicscript_run.py collects the log and writes it only at the end, and shows nothing while
+    the run lasts. Built the way that runner builds its own dialog (fusionscript.UIDispatcher on
+    fusion.UIManager). Best effort: if Resolve refuses, the run carries on without it."""
+
+    def __init__(self, ctx, title):
+        self.win = None
+        try:
+            import DaVinciResolveScript as bmd          # ResolvePython has it built in
+            ui = ctx.fusion.UIManager
+            self.disp = bmd.UIDispatcher(ui)
+            self.win = self.disp.AddWindow({"ID": "ShotMatchLive", "WindowTitle": title, "Geometry": [300, 260, 640, 320]},
+                                           ui.VGroup([ui.TextEdit({"ID": "log", "ReadOnly": True})]))
+            self.box = self.win.GetItems()["log"]
+            self.win.Show()
+        except Exception:
+            self.win = None
+
+    def add(self, line):
+        if self.win is not None:
+            try:
+                self.box.Append(line)
+            except Exception:
+                self.win = None
+
+    def pump(self):
+        if self.win is not None:
+            try:
+                self.disp.StepLoop(False)
+            except Exception:
+                pass
+
+    def close(self):
+        if self.win is not None:
+            self.win.Hide()
+
+
 def run(ctx):
     v = ctx.vars
     mode = v["mode"].lower().replace(" ", "_")
@@ -128,18 +166,28 @@ def run(ctx):
     proc = subprocess.Popen([rp, "-u", "-s", "-E", "-c", boot, deps, engine] + args, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
                             creationflags=flags)
+    # No window pump means no MagicScript window: started from the Stream Deck or a terminal
+    live = _LiveWindow(ctx, "Shot match: " + v["mode"]) if getattr(ctx, "_pump", None) is None else None
     lines = queue.Queue()
     threading.Thread(target=lambda: [lines.put(l.rstrip()) for l in proc.stdout], daemon=True).start()
     seen = []
-    while proc.poll() is None or not lines.empty():
-        try:
-            line = lines.get(timeout=0.1)
-        except queue.Empty:
-            ctx.progress()                              # keeps the MagicScript window responsive
-            continue
-        if line:
-            ctx.log(line)
-            seen.append(line.strip())
+    try:
+        while proc.poll() is None or not lines.empty():
+            try:
+                line = lines.get(timeout=0.1)
+            except queue.Empty:
+                ctx.progress()                          # keeps the MagicScript window responsive
+                if live:
+                    live.pump()
+                continue
+            if line:
+                ctx.log(line)
+                seen.append(line.strip())
+                if live:
+                    live.add(line)
+    finally:
+        if live:
+            live.close()
     proc.stdout.close()
     if proc.returncode != 0:
         raise RuntimeError(seen[-1] if seen else "the engine stopped with code %s" % proc.returncode)
