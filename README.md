@@ -52,6 +52,15 @@ First-pass shot matching on the Color page. Park the playhead on the hero, selec
 clips of the scene, run the script. Each clip is matched to the hero as graded, with Gain
 R/G/B only, in the node labelled `Linear` at the head of layer 3.
 
+Several scenes in one run: grade the Linear node of one hero per scene, give each hero a
+Green flag, select the whole timeline and run. Each shot goes to the hero it shares most
+with (colours and their brightness against the frame's median), its two neighbours on each
+side voting too; on the bench scenes mixed into one timeline that found the right hero for
+103 shots of 110. A shot with the clip colour of exactly one hero always goes to that hero,
+which settles intercut scenes. Preview prints one table per scene and marks close calls
+"check its hero"; each scene gets its own folder (`scene_01/`...). Collect always uses the
+playhead hero.
+
 Install it twice in
 `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\`:
 

@@ -96,6 +96,9 @@ MIN_SKIN_PIXELS = 300      # at 1/4 resolution
 SAME_ANGLE = 0.9           # thumbnail correlation above which two shots are one camera angle
 LIGHT_CHANGE_STOPS = 1 / 3 # a shot solved this far from its group keeps its own value
 WB_BINS, WB_STEP, WB_ITERATIONS = 24, 0.5, 3
+HERO_FLAG = "Green"        # flag colour that marks the heroes when several scenes are matched in one run
+ASSIGN_NEIGHBOURS = 2      # clips on each side on the timeline that also vote for a shot's hero
+CLOSE_CALL = 0.05          # hero scores closer than this: Preview asks to check the shot's hero
 
 
 # ─── images ─────────────────────────────────────────────────────
@@ -364,6 +367,54 @@ def fingerprint(encoded: np.ndarray) -> np.ndarray:
     v = np.asarray(Image.fromarray(y.astype(np.float32)).resize((48, 27), Image.BILINEAR)).ravel()
     v = v - v.mean()
     return v / max(float(np.linalg.norm(v)), 1e-9)
+
+
+def scene_signature(encoded: np.ndarray) -> np.ndarray:
+    """Which colours a frame holds and how bright each is against its median: two shots of
+    one place and light share most of it, whatever their exposure. Mixing the 6 bench scenes
+    into one timeline, it alone finds the right hero for 86 shots of 110, 103 with the
+    timeline neighbours voting too."""
+    px = analysis_pixels(encoded, max(1, encoded.shape[1] // 480))
+    y = np.log2(np.maximum(luma(px), 1e-5))
+    h, _ = np.histogramdd(np.column_stack([chroma(px), y - np.median(y)]), bins=(24, 24, 8),
+                          range=((0, 1), (0, 1), (-4, 4)))
+    return h / max(h.sum(), 1)
+
+
+def assign_heroes(order: list[str], signatures: dict, heroes: list[str], colours: dict) -> dict:
+    """Hero of each shot, for a run with several heroes: {shot: (hero, how)}. order: every
+    clip, heroes included, in timeline order. A shot with the clip colour of exactly one hero
+    goes to that hero. Any other shot goes to the hero whose signature it shares most, its
+    ASSIGN_NEIGHBOURS neighbours on each side voting too (scenes are mostly runs of clips)."""
+    by_colour = {}
+    for h in heroes:
+        by_colour.setdefault(colours.get(h) or None, []).append(h)
+    forced = {n: by_colour[colours[n]][0] for n in order
+              if n not in heroes and colours.get(n) and len(by_colour.get(colours[n], [])) == 1}
+    scores = []
+    for n in order:
+        if n in heroes or n in forced:
+            row = np.array([1.0 if h == (n if n in heroes else forced[n]) else 0.0 for h in heroes])
+        else:
+            row = np.array([np.minimum(signatures[n], signatures[h]).sum() for h in heroes])
+            row = row / max(row.max(), 1e-9)
+        scores.append(row)
+    scores = np.array(scores)
+    out = {}
+    for i, n in enumerate(order):
+        if n in heroes:
+            continue
+        if n in forced:
+            out[n] = (forced[n], "hero by clip colour")
+            continue
+        near = scores[max(0, i - ASSIGN_NEIGHBOURS):i + ASSIGN_NEIGHBOURS + 1].mean(0)
+        total = scores[i] + near
+        top = np.argsort(total)[::-1]
+        how = ""
+        if len(heroes) > 1 and total[top[0]] - total[top[1]] < CLOSE_CALL:
+            how = f"check its hero: close call with {heroes[top[1]][:24]}"
+        out[n] = (heroes[top[0]], how)
+    return out
 
 
 def camera_tag(name: str) -> str | None:
@@ -712,7 +763,7 @@ def export_ungraded_still(project, timeline, item, fps: int, path: Path, keep_li
     return problems
 
 
-def confirm_write(resolve, count: int, hero_name: str) -> bool:
+def confirm_write(resolve, count: int, hero_text: str) -> bool:
     """Yes/Cancel window before Apply writes. The API cannot target a layer or tell which one
     the node editor shows (checked in the 21.1 and 21.1.2 DaVinciResolveScript.pyi), so ask. No window,
     no write."""
@@ -724,7 +775,7 @@ def confirm_write(resolve, count: int, hero_name: str) -> bool:
               "Run Shot Match Apply from Workspace > Scripts.")
         return False
     disp = bmd.UIDispatcher(ui)
-    text = (f"Write Gain to {count} clips? The hero, {hero_name}, is left as it is.\n\n"
+    text = (f"Write Gain to {count} clips? Heroes are left as they are ({hero_text}).\n\n"
             f"Resolve writes into the layer on screen. Check that layer {LINEAR_LAYER} is showing: "
             "a wrong layer is overwritten, with no undo.")
     button = {"Weight": 0, "MinimumSize": [88, 24], "MaximumSize": [88, 24]}
@@ -837,8 +888,10 @@ def clean_old_runs(now: datetime.datetime | None = None) -> None:
         print(f"  Cleaned {OUT_ROOT}: {removed} runs older than {KEEP_DAYS} days deleted, {freed / 1e6:.0f} MB freed.")
 
 
-def open_scene():
-    """resolve, project, timeline, fps, hero, clips (hero included), or Stop."""
+def open_scene(flags: bool = True):
+    """resolve, project, timeline, fps, heroes, clips (heroes included), or Stop. The heroes
+    are the selected clips flagged HERO_FLAG when there are any (several scenes in one run,
+    flags=True), else the clip under the playhead."""
     resolve = get_resolve()
     project = resolve.GetProjectManager().GetCurrentProject()
     timeline = project.GetCurrentTimeline() if project else None
@@ -852,19 +905,27 @@ def open_scene():
         fps = round(float(rate.split()[0]))
     except (IndexError, ValueError):
         raise Stop(f"Could not read the timeline frame rate (got {rate!r}).")
+    clips = selected_clips(timeline)
+    flagged = [c for c in clips if HERO_FLAG in (c.GetFlagList() or [])] if flags else []
+    if flagged:
+        if len(flagged) == len(clips):
+            raise Stop(f"Every selected clip has a {HERO_FLAG} flag: flag only the heroes, then run this again.")
+        return resolve, project, timeline, fps, flagged, clips
     hero = timeline.GetCurrentVideoItem()
     if not hero:
-        raise Stop("Park the playhead on the hero clip, then run this again.")
-    clips = selected_clips(timeline)
+        raise Stop(f"Park the playhead on the hero clip (or flag the heroes {HERO_FLAG}), then run this again.")
     if hero.GetUniqueId() not in {c.GetUniqueId() for c in clips}:
         clips.append(hero)
     if len(clips) < 2:
         raise Stop("Select the clips of the scene (the hero can be one of them), then run this again.")
-    return resolve, project, timeline, fps, hero, clips
+    return resolve, project, timeline, fps, [hero], clips
 
 
 def run_in_resolve(apply: bool = False) -> int:
-    resolve, project, timeline, fps, hero, clips = open_scene()
+    resolve, project, timeline, fps, hero_items, clips = open_scene()
+    hero_ids = {h.GetUniqueId() for h in hero_items}
+    hero_text = (f"hero {hero_items[0].GetName()}" if len(hero_items) == 1
+                 else f"{len(hero_items)} heroes flagged {HERO_FLAG}")
     clean_old_runs()
     resolve.OpenPage("color")
     start_tc = timeline.GetCurrentTimecode()
@@ -872,14 +933,14 @@ def run_in_resolve(apply: bool = False) -> int:
     still_dir = out_dir / "stills"
     still_dir.mkdir(parents=True, exist_ok=True)
     if apply:
-        print(f"Shot match APPLY: {len(clips)} clips, hero {hero.GetName()}. "
-              "Gain will be written into each Linear node, the hero's is left as it is.\n"
+        print(f"Shot match APPLY: {len(clips)} clips, {hero_text}. "
+              "Gain will be written into each Linear node, the heroes' are left as they are.\n"
               f"  It writes into the layer the node editor shows: layer {LINEAR_LAYER} must be on screen.\n"
               "  A window asks you to confirm before anything is written.")
     else:
-        print(f"Shot match preview: {len(clips)} clips, hero {hero.GetName()}. Nothing is written to the grade.")
+        print(f"Shot match preview: {len(clips)} clips, {hero_text}. Nothing is written to the grade.")
 
-    stills, report, targets = [], [], {}
+    stills, report, targets, colours = [], [], {}, {}
     try:
         progress = Progress("Capture", len(clips))
         for n, item in enumerate(sorted(clips, key=lambda c: c.GetStart()), 1):
@@ -891,9 +952,10 @@ def run_in_resolve(apply: bool = False) -> int:
                 report.append(f"  {name}: skipped, needs exactly one node labelled Linear in layer {LINEAR_LAYER}")
                 continue
             path = still_dir / f"{name}.tif"
-            is_hero = item.GetUniqueId() == hero.GetUniqueId()
+            is_hero = item.GetUniqueId() in hero_ids
             problems = export_ungraded_still(project, timeline, item, fps, path, node if is_hero else None,
                                              extras=True)
+            colours[name] = item.GetClipColor() or ""
             report.append(f"  {name}: Linear is node {node} of layer {LINEAR_LAYER}"
                           + (f"; {'; '.join(problems)}" if problems else ""))
             if path.exists():
@@ -905,24 +967,46 @@ def run_in_resolve(apply: bool = False) -> int:
     print("\n".join(report))
 
     try:
-        heroes = [s for s in stills if s[2]]
+        heroes = [name for name, _, is_hero in stills if is_hero]
         if not heroes:
             raise Stop("No still of the hero, so nothing to match against. See the lines above.")
-        sample = tifffile.imread(str(heroes[0][1]))
-        extra = [tifffile.imread(str(x)) for x in extra_paths(heroes[0][1])]
+        paths = {name: path for name, path, _ in stills}
+        sample = tifffile.imread(str(paths[heroes[0]]))
+        extra = [tifffile.imread(str(x)) for x in extra_paths(paths[heroes[0]])]
         extra_format = (f"; {len(extra)} more frames a clip, {extra[0].shape[1]}x{extra[0].shape[0]}, "
                         f"{extra[0].dtype}" if extra else "")
         print(f"\n  Still format: {sample.shape[1]}x{sample.shape[0]}, {sample.dtype}{extra_format}")
-        hero_node = measure_hero_node(project, timeline, hero, fps, targets[heroes[0][0]][1],
-                                      load_still(heroes[0][1]), still_dir / "_hero_off.tif")
-        rows = match_stills([(s[0], s[1]) for s in stills], heroes[0][0], out_dir, hero_node)
-        print_table(rows, hero_node)
+        if len(heroes) == 1:
+            scenes = {heroes[0]: [(n, p) for n, p, _ in stills]}
+            assigned = {}
+        else:
+            order = [name for name, _, _ in stills]
+            assigned = assign_heroes(order, {n: scene_signature(load_still(paths[n])) for n in order},
+                                     heroes, colours)
+            scenes = {h: [(h, paths[h])] + [(n, paths[n]) for n in order if n in assigned and assigned[n][0] == h]
+                      for h in heroes}
+        runs = []
+        for k, (hero_name, members) in enumerate(scenes.items(), 1):
+            item, node = targets[hero_name]
+            if len(heroes) > 1:
+                print(f"\n  Scene {k} of {len(scenes)}: hero {hero_name}, {len(members) - 1} shots")
+            hero_node = measure_hero_node(project, timeline, item, fps, node, load_still(paths[hero_name]),
+                                          still_dir / f"_hero_off_{k}.tif")
+            scene_dir = out_dir if len(heroes) == 1 else out_dir / f"scene_{k:02d}"
+            rows = match_stills(members, hero_name, scene_dir, hero_node)
+            for r in rows:
+                how = assigned.get(r["clip"], ("", ""))[1]
+                if how:
+                    r["note"] = (r["note"] + "; " if r["note"] else "") + how
+            print_table(rows, hero_node)
+            runs.append((rows, hero_node, scene_dir))
         if apply:
-            count = sum(1 for r in rows if r["gain"] is not None and r["note"] != "hero" and r["clip"] in targets)
-            if confirm_write(resolve, count, hero.GetName()):
-                write_gains(rows, targets, out_dir, hero_node)
-                verify_written(project, timeline, fps, rows, targets,
-                               {name: path for name, path, _ in stills}, hero_node, still_dir)
+            count = sum(1 for rows, _, _ in runs for r in rows
+                        if r["gain"] is not None and r["note"] != "hero" and r["clip"] in targets)
+            if confirm_write(resolve, count, hero_text):
+                for rows, hero_node, scene_dir in runs:
+                    write_gains(rows, targets, scene_dir, hero_node)
+                    verify_written(project, timeline, fps, rows, targets, paths, hero_node, still_dir)
             else:
                 print("\n  Cancelled: nothing written.")
     finally:
@@ -952,7 +1036,7 @@ def run_collect(final: bool = False) -> int:
     """Measure the Linear node of a scene matched by hand. Writes nothing to the grade.
     final: also save each clip with its whole grade on (final/), to see what the finished
     grade lines up (faces, surfaces), not only the first pass."""
-    resolve, project, timeline, fps, hero, clips = open_scene()
+    resolve, project, timeline, fps, (hero,), clips = open_scene(flags=False)
     clean_old_runs()
     resolve.OpenPage("color")
     start_tc = timeline.GetCurrentTimecode()
