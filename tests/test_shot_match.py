@@ -130,6 +130,23 @@ class SolverTest(unittest.TestCase):
         self.assertIn("Capture: 4/4 done in", console.text)
 
     @mock.patch.object(shot_match, "KEEP_LIGHT_FROM", 0.5)
+    def test_mediapipe_extras_are_stubbed_when_absent(self):
+        # As in MagicScript's pydeps: no cv2, matplotlib or sounddevice installed. Stubbing
+        # matplotlib first once made find_spec("matplotlib") raise for matplotlib.pyplot.
+        import importlib.util
+        names = ("cv2", "matplotlib", "matplotlib.pyplot", "sounddevice")
+        real = importlib.util.find_spec
+        with mock.patch.dict(sys.modules, {n: None for n in names}), \
+                mock.patch.object(importlib.util, "find_spec",
+                                  # not installed, but a module already in sys.modules is looked up
+                                  # for real: a stub without __spec__ raises, as on Shark
+                                  lambda n, *a: None if n in names and n not in sys.modules else real(n, *a)):
+            for n in names:
+                del sys.modules[n]
+            shot_match.stub_unused_mediapipe_deps()
+            self.assertTrue(all(n in sys.modules for n in names))
+            self.assertIs(sys.modules["matplotlib"].pyplot, sys.modules["matplotlib.pyplot"])
+
     def test_far_light_is_only_partly_corrected(self):
         self.assertEqual(shot_match.keep_light(0.4), 0.4)
         self.assertAlmostEqual(shot_match.keep_light(-1.5), -0.8)

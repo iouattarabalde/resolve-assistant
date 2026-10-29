@@ -164,6 +164,9 @@ class SkinFinder:
         except ImportError:
             self.reason = "mediapipe is not installed"
             return
+        except Exception as exc:  # a broken install must not stop the match either
+            self.reason = f"mediapipe could not load ({type(exc).__name__}: {exc})"
+            return
         try:
             if not MODEL_PATH.exists():
                 MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -199,9 +202,15 @@ def stub_unused_mediapipe_deps() -> None:
     (OpenCV's Windows wheel carries an LGPL FFmpeg), so empty modules stand in when absent."""
     import importlib.util
     import types
-    for name in ("cv2", "matplotlib", "matplotlib.pyplot", "sounddevice"):
-        if name not in sys.modules and importlib.util.find_spec(name.split(".")[0]) is None:
-            sys.modules[name] = types.ModuleType(name)
+    for top, subs in (("cv2", ()), ("matplotlib", ("pyplot",)), ("sounddevice", ())):
+        # Only the top-level name goes to find_spec: once a stub is in sys.modules it has no
+        # spec, and find_spec("matplotlib") then raises (seen on Shark, 2026-10-29)
+        if top in sys.modules or importlib.util.find_spec(top) is not None:
+            continue
+        sys.modules[top] = types.ModuleType(top)
+        for sub in subs:
+            sys.modules[f"{top}.{sub}"] = types.ModuleType(f"{top}.{sub}")
+            setattr(sys.modules[top], sub, sys.modules[f"{top}.{sub}"])
 
 
 # ─── solver ─────────────────────────────────────────────────────
