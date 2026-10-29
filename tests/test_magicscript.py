@@ -23,7 +23,7 @@ class Ctx:
     def __init__(self, kit, **values):
         self.kit_dir, self.logs = kit, []
         self.vars = {"mode": "Preview", "layer": 3, "node_label": "Linear", "out_dir": "~/Documents/ShotMatch",
-                     "keep_light": True, **values}
+                     "keep_light": True, "hero_flag": "Green", **values}
         self.lib = mock.Mock(expand=lambda p: p.replace("~", "HOME"))
 
     def log(self, text):
@@ -62,7 +62,8 @@ class WrapperTest(unittest.TestCase):
         ctx = Ctx(str(self.kit), layer=4, node_label="Lin", keep_light=False)
         self.assertEqual(ms.run(ctx), "Values and contact sheet: somewhere")
         self.assertEqual(self.args(ctx), ["--resolve", "preview", "--layer", "4", "--label", "Lin",
-                                          "--out", "HOME/Documents/ShotMatch", "--no-keep-light"])
+                                          "--out", "HOME/Documents/ShotMatch", "--hero-flag", "Green",
+                                          "--no-keep-light"])
         self.assertIn("deps first True", ctx.logs)
 
     def test_only_apply_skips_the_engine_window_because_magicscript_asked(self):

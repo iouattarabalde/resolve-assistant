@@ -56,7 +56,7 @@ R/G/B only, in the node labelled `Linear` at the head of layer 3.
 
 One script, **Shot match to the hero** (Colour), with a Mode box: Preview, Apply, Collect or
 Collect Final.
-The layer, node label, output folder and "keep part of a big light difference" are boxes in
+The layer, node label, output folder, hero flag colour and "keep part of a big light difference" are boxes in
 its dialog. Build it from this repo, never edit the copies:
 
 ```
@@ -76,6 +76,15 @@ The script is flagged destructive, so MagicScript asks for its "I understand" ti
 run, Preview and Collect included: MagicScript can only make the tick depend on a yes/no box,
 not on a choice. Apply passes `--confirmed`, so the engine's own window does not open.
 SetCDL still writes into the layer the node editor shows, hence the warning in the dialog.
+
+Several scenes in one run: grade the Linear node of one hero per scene, give each hero a
+Green flag, select the whole timeline and run. Each shot goes to the hero it shares most
+with (colours and their brightness against the frame's median), its two neighbours on each
+side voting too; on the bench scenes mixed into one timeline that found the right hero for
+103 shots of 110. A shot with the clip colour of exactly one hero always goes to that hero,
+which settles intercut scenes. Preview prints one table per scene and marks close calls
+"check its hero"; each scene gets its own folder (`scene_01/`...). Collect always uses the
+playhead hero.
 
 ### From the Scripts menu
 

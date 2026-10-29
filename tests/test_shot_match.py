@@ -80,6 +80,17 @@ class SolverTest(unittest.TestCase):
         self.assertTrue((self.folder / "pages" / "contact_sheet.jpg").exists())
         self.assertTrue((self.folder / "pages" / "contact_sheet_2.jpg").exists())
 
+    def test_assign_heroes_by_signature_neighbours_and_colour(self):
+        a, b = np.array([1.0, 0, 0, 0]), np.array([0, 0, 0, 1.0])
+        sigs = {"HA": a, "s1": a * 0.9 + b * 0.1, "s2": b * 0.8 + a * 0.2, "HB": b, "s3": (a + b) / 2}
+        order = ["HA", "s1", "s2", "HB", "s3"]
+        got = shot_match.assign_heroes(order, sigs, ["HA", "HB"], {})
+        self.assertEqual(got["s1"][0], "HA")
+        self.assertEqual(got["s2"][0], "HB")
+        self.assertEqual(got["s3"][0], "HB")   # a tie on the image, its neighbour HB decides
+        got = shot_match.assign_heroes(order, sigs, ["HA", "HB"], {"HA": "Teal", "s2": "Teal"})
+        self.assertEqual(got["s2"], ("HA", "hero by clip colour"))
+
     def test_hero_is_neutral(self):
         rows = shot_match.match_stills([("A", self.folder / "A_HERO.tif"), ("B", self.folder / "B.tif")],
                                        "A", self.folder / "out")

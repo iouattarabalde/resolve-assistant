@@ -54,6 +54,10 @@ MANIFEST = {
         {"id": "node_label", "label": "Node label", "type": "text", "default": "Linear", "pick": False},
         {"id": "out_dir", "label": "Output folder", "type": "text", "default": "~/Documents/ShotMatch", "browse": "folder",
          "help": "Runs older than 30 days in it are deleted, only the ones this script made."},
+        {"id": "hero_flag", "label": "Hero flag (several scenes in one run)", "type": "choice", "default": "Green",
+         "choices": ["Blue", "Cyan", "Green", "Yellow", "Red", "Pink", "Purple", "Fuchsia", "Rose", "Lavender",
+                     "Sky", "Mint", "Lemon", "Sand", "Cocoa", "Cream"],
+         "help": "Flag one hero per scene in this colour and select them all. No flagged clip: the hero is under the playhead."},
         {"id": "keep_light", "label": "Keep part of a big light difference", "type": "bool", "default": True,
          "help": "Past 1/2 stop from the hero, only 30 % of the rest is corrected."},
     ],
@@ -154,7 +158,7 @@ def run(ctx):
     deps = os.path.join(ctx.kit_dir, "pydeps")
     _ensure_packages(ctx, rp, deps, os.path.join(ctx.kit_dir, "pydeps-tools"))
     args = ["--resolve", mode, "--layer", str(int(v["layer"])), "--label", v["node_label"] or "Linear",
-            "--out", ctx.lib.expand(v["out_dir"])]
+            "--out", ctx.lib.expand(v["out_dir"]), "--hero-flag", v.get("hero_flag") or "Green"]
     if not v["keep_light"]:
         args.append("--no-keep-light")
     if mode == "apply":

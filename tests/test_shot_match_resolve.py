@@ -49,6 +49,7 @@ class Item:
         self.cdl = None
         self.hand_gain, self.hand_power, self.hand_offset = np.ones(3), 1.0, 25.0   # Linear node by hand
         self.honours_offset = 1   # 0: a Resolve that drops the CDL Offset
+        self.flags, self.colour, self.shares = [], "", EVEN
 
     def GetName(self): return self.name
     def GetUniqueId(self): return self.name
@@ -56,6 +57,8 @@ class Item:
     def GetEnd(self): return self.start + 48
     def GetNodeGraph(self, layer): return self.layers.get(layer)
     def GetColorGroup(self): return None
+    def GetFlagList(self): return self.flags
+    def GetClipColor(self): return self.colour
 
     def SetCDL(self, cdl):
         self.cdl = cdl
@@ -95,7 +98,7 @@ class Project:
     def render(self, item, path):
         # Record what was switched off at the moment of the export
         self.test.states.setdefault(item.name, []).append({l: list(g.enabled) for l, g in item.layers.items()})
-        img = scene(1 if item is self.timeline.hero else 2, item.light, EVEN)
+        img = scene(1 if item is self.timeline.hero else 2, item.light, item.shares)
         if item.layers[3].enabled[0]:   # the Linear node, in linear: written CDL, else the hand values
             lin = shot_match.decode_intermediate(img / 65535.0)
             if item.cdl:
@@ -145,6 +148,50 @@ class ResolveFlowTest(unittest.TestCase):
         for p in self.patches:
             p.stop()
         self.tmp.cleanup()
+
+    def two_scenes(self):
+        """Timeline of two intercut scenes, heroes flagged: A (hand Gain 1) and B (hand Gain 0.8)."""
+        warm, cool = np.array([0.3, 0.3, 0.3, 0.05, 0.05, 0.0]), np.array([0, 0.05, 0.05, 0.3, 0.3, 0.3])
+        hero_a, hero_b = Item("hero_a", 86400, np.ones(3)), Item("hero_b", 86448, np.ones(3))
+        shot_b, shot_a = Item("shot_b", 86496, np.full(3, 0.5)), Item("shot_a", 86544, np.full(3, 2.0))
+        for item, shares in ((hero_a, warm), (shot_a, warm), (hero_b, cool), (shot_b, cool)):
+            item.shares = shares
+        hero_a.flags = hero_b.flags = [shot_match.HERO_FLAG]
+        hero_b.hand_gain = np.full(3, 0.8)
+        self.timeline.items, self.timeline.hero = [hero_a, hero_b, shot_b, shot_a], None
+        return hero_a, hero_b, shot_a, shot_b
+
+    def test_flagged_heroes_each_match_their_own_scene(self):
+        hero_a, hero_b, shot_a, shot_b = self.two_scenes()
+        with mock.patch("sys.stdout", io.StringIO()) as out:
+            shot_match.run_in_resolve(apply=True)
+        self.assertIn("2 heroes flagged", out.getvalue())
+        self.assertIsNone(hero_a.cdl)
+        self.assertIsNone(hero_b.cdl)
+        slope_a = np.array([float(v) for v in shot_a.cdl["Slope"].split()])
+        slope_b = np.array([float(v) for v in shot_b.cdl["Slope"].split()])
+        np.testing.assert_allclose(slope_a, 0.5, atol=0.05)   # twice as bright as hero A
+        np.testing.assert_allclose(slope_b, 1.6, atol=0.15)   # half as bright as hero B, graded 0.8
+        run = next(Path(self.tmp.name).glob("2*"))
+        self.assertTrue((run / "scene_01" / "match_values.csv").exists())
+        self.assertTrue((run / "scene_02" / "match_values.csv").exists())
+
+    def test_clip_colour_overrides_the_automatic_hero(self):
+        hero_a, hero_b, shot_a, shot_b = self.two_scenes()
+        hero_b.colour = shot_a.colour = "Orange"
+        hero_a.colour = "Teal"
+        with mock.patch("sys.stdout", io.StringIO()) as out:
+            shot_match.run_in_resolve(apply=False)
+        self.assertIn("hero by clip colour", out.getvalue())
+        run = next(Path(self.tmp.name).glob("2*"))
+        self.assertIn("shot_a", (run / "scene_02" / "match_values.csv").read_text())
+
+    def test_all_clips_flagged_stops(self):
+        for item in self.timeline.items:
+            item.flags = [shot_match.HERO_FLAG]
+        self.timeline.hero = None
+        with self.assertRaises(shot_match.Stop):
+            shot_match.open_scene()
 
     def test_old_runs_are_cleaned_and_only_ours(self):
         out = Path(self.tmp.name)
