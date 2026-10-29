@@ -83,6 +83,7 @@ ANALYSIS_STEP = 2
 PROGRESS_EVERY = 10        # seconds between progress lines in the Console
 EXTRA_FRAMES = (0.2, 0.8)  # more frames per clip, as fractions of its length (the middle is the main one)
 EXTRA_SIZE = 960           # longer edge of the extra frames, pixels
+SHEET_ROWS = 100           # clips per contact sheet page
 CLIP_MARGIN_DI = 0.015     # sensor clip differs per shot, so it is measured per still
 GRIDS = [(b, s) for b in (16, 20, 24, 28, 32) for s in (0.0, 0.5)]
 MIN_BIN_PIXELS = 200
@@ -309,17 +310,20 @@ def match_stills(stills: list[tuple[str, Path]], hero_name: str, out_dir: Path,
     skin_finder = SkinFinder()
     if skin_finder.reason:
         print(f"  Skin: off, {skin_finder.reason}. Matching on surfaces only.")
-    encoded = {name: load_still(path) for name, path in stills}
+    # Only a thumbnail and a fingerprint of each clip stay in memory: a full frame is about
+    # 50 MB, too much to hold for an episode of 200 shots
+    prints, thumbs = {}, {}
 
     def pooled(name, path):
         """Surface and skin pixels of the main frame and of its extra frames, if any."""
+        enc = load_still(path)
+        prints[name], thumbs[name] = fingerprint(enc), enc[::4, ::4].astype(np.float32)
         extras = [load_still(x) for x in extra_paths(path)]
         if not extras:
-            enc = encoded[name]
             return analysis_pixels(enc), skin_finder.pixels(enc)
         # Extra frames are smaller: bring the main one to their size so each frame counts alike
-        factor = max(1, round(encoded[name].shape[1] / extras[0].shape[1]))
-        frames = [encoded[name][::factor, ::factor]] + extras
+        factor = max(1, round(enc.shape[1] / extras[0].shape[1]))
+        frames = [enc[::factor, ::factor]] + extras
         step, skin_step = max(1, ANALYSIS_STEP // factor), max(1, 4 // factor)
         return (np.concatenate([analysis_pixels(f, step) for f in frames]),
                 np.concatenate([skin_finder.pixels(f, skin_step) for f in frames]))
@@ -344,12 +348,11 @@ def match_stills(stills: list[tuple[str, Path]], hero_name: str, out_dir: Path,
         rows.append(r)
     progress.step(len(stills))
     skin_finder.close()
-    group_by_angle(rows, {name: fingerprint(enc) for name, enc in encoded.items()},
-                   hero_node["gain"] if hero_node else None)
+    group_by_angle(rows, prints, hero_node["gain"] if hero_node else None)
     for r in rows:
-        lin = decode_intermediate(encoded[r["clip"]][::4, ::4])
+        lin = decode_intermediate(thumbs.pop(r["clip"]).astype(np.float64))
         after = np.maximum(lin * r["gain"] + lift, 0) ** power if r["gain"] is not None else lin
-        sheet.append(np.hstack([preview(lin), preview(after)]))
+        sheet.append((np.hstack([preview(lin), preview(after)]) * 255).astype(np.uint8))
     write_outputs(rows, sheet, out_dir)
     return rows
 
@@ -428,12 +431,15 @@ def write_outputs(rows: list[dict], sheet: list[np.ndarray], out_dir: Path) -> N
                         "25.00", "0.00", f"{r['surfaces']:+.2f}",
                         "" if np.isnan(r["skin"]) else f"{r['skin']:+.2f}", f"{r['spread']:.2f}", r["note"]])
     height = 216
-    tiles = [Image.fromarray((t * 255).astype(np.uint8)) for t in sheet]
+    tiles = [Image.fromarray(t) for t in sheet]
     tiles = [t.resize((int(t.width * height / t.height), height)) for t in tiles]
-    canvas = Image.new("RGB", (max(t.width for t in tiles) + 20, (height + 10) * len(tiles) + 10), (40, 40, 40))
-    for i, t in enumerate(tiles):
-        canvas.paste(t, (10, 10 + i * (height + 10)))
-    canvas.save(out_dir / "contact_sheet.jpg", quality=90)
+    # A JPEG is at most 65535 pixels tall: past SHEET_ROWS clips, one more sheet per page
+    for page, start in enumerate(range(0, len(tiles), SHEET_ROWS)):
+        chunk = tiles[start:start + SHEET_ROWS]
+        canvas = Image.new("RGB", (max(t.width for t in chunk) + 20, (height + 10) * len(chunk) + 10), (40, 40, 40))
+        for i, t in enumerate(chunk):
+            canvas.paste(t, (10, 10 + i * (height + 10)))
+        canvas.save(out_dir / ("contact_sheet.jpg" if not page else f"contact_sheet_{page + 1}.jpg"), quality=90)
 
 
 def print_table(rows: list[dict], hero_node: dict | None = None) -> None:
