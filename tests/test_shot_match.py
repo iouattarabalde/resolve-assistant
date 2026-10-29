@@ -73,6 +73,13 @@ class SolverTest(unittest.TestCase):
         self.assertTrue((self.folder / "out" / "match_values.csv").exists())
         self.assertTrue((self.folder / "out" / "contact_sheet.jpg").exists())
 
+    def test_long_scenes_split_the_contact_sheet(self):
+        with mock.patch.object(shot_match, "SHEET_ROWS", 1):
+            shot_match.match_stills([("A", self.folder / "A_HERO.tif"), ("B", self.folder / "B.tif")],
+                                    "A", self.folder / "pages")
+        self.assertTrue((self.folder / "pages" / "contact_sheet.jpg").exists())
+        self.assertTrue((self.folder / "pages" / "contact_sheet_2.jpg").exists())
+
     def test_hero_is_neutral(self):
         rows = shot_match.match_stills([("A", self.folder / "A_HERO.tif"), ("B", self.folder / "B.tif")],
                                        "A", self.folder / "out")
