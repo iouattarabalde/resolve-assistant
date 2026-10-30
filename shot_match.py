@@ -160,6 +160,8 @@ class SkinFinder:
     def __init__(self):
         self.segmenter, self.reason = None, ""
         try:
+            os.environ.setdefault("GLOG_minloglevel", "2")       # its TensorFlow Lite INFO/WARNING lines
+            os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
             import mediapipe as mp
             from mediapipe.tasks.python import BaseOptions, vision
         except ImportError:
@@ -853,7 +855,10 @@ def verify_written(project, timeline, fps: int, rows: list[dict], targets: dict,
                   & (off.min(1) > 2 * DI_LOG_CUT))
             expected = np.maximum(decode_intermediate(off[ok]) * r["gain"] + lift, 1e-6) ** power
             got = np.maximum(decode_intermediate(on[ok]), 1e-6)
-            gap = float(np.median(np.abs(np.log2(luma(got) / np.maximum(luma(expected), 1e-6)))))
+            with np.errstate(invalid="ignore", divide="ignore"):
+                ratio = np.log2(np.maximum(luma(got), 1e-6) / np.maximum(luma(expected), 1e-6))
+            ratio = ratio[np.isfinite(ratio)]
+            gap = float(np.median(np.abs(ratio))) if ratio.size else 0.0
             gaps.append(gap)
             if gap > 0.05:
                 bad.append(f"{r['clip']}: {gap:.2f} stop from what was intended")
@@ -921,10 +926,43 @@ def open_scene(flags: bool = True):
     return resolve, project, timeline, fps, [hero], clips
 
 
+def scenes_by_flag(clips: list, heroes: list) -> dict:
+    """{clip id: scene flag colour} when the scenes are flagged by colour (every clip of a scene
+    flagged in its colour, its hero flagged HERO_FLAG as well, or the clip under the playhead
+    for a single scene), else {}. Stop when a scene has no hero or two, or a clip carries two
+    scene colours."""
+    colour = {}
+    for c in clips:
+        found = [f for f in (c.GetFlagList() or []) if f != HERO_FLAG]
+        if len(found) > 1:
+            raise Stop(f"{c.GetName()} has flags {', '.join(found)}: one scene colour a clip, then run this again.")
+        if found:
+            colour[c.GetUniqueId()] = found[0]
+    if not colour:
+        return {}
+    hero_ids = {h.GetUniqueId() for h in heroes}
+    for h in heroes:
+        if h.GetUniqueId() not in colour:
+            raise Stop(f"Hero {h.GetName()} has no scene flag: flag it in its scene's colour too.")
+    for scene in sorted(set(colour.values())):
+        found = [c.GetName() for c in clips if colour.get(c.GetUniqueId()) == scene and c.GetUniqueId() in hero_ids]
+        if len(found) != 1:
+            raise Stop(f"Scene {scene} has {len(found) or 'no'} clip{'s' if len(found) > 1 else ''} also flagged "
+                       f"{HERO_FLAG}{': ' + ', '.join(found) if found else ''}. Give each scene exactly one hero.")
+    return colour
+
+
 def run_in_resolve(apply: bool = False) -> int:
     resolve, project, timeline, fps, hero_items, clips = open_scene()
     hero_ids = {h.GetUniqueId() for h in hero_items}
+    scene_flag = scenes_by_flag(clips, hero_items)
+    if scene_flag:
+        loose = [c.GetName() for c in clips if c.GetUniqueId() not in scene_flag]
+        clips = [c for c in clips if c.GetUniqueId() in scene_flag]
+        if loose:
+            say(f"Left as they are, no scene flag: {', '.join(loose)}")
     hero_text = (f"hero {hero_items[0].GetName()}" if len(hero_items) == 1
+                 else f"{len(hero_items)} scenes by flag colour, heroes flagged {HERO_FLAG}" if scene_flag
                  else f"{len(hero_items)} heroes flagged {HERO_FLAG}")
     clean_old_runs()
     resolve.OpenPage("color")
@@ -955,7 +993,7 @@ def run_in_resolve(apply: bool = False) -> int:
             is_hero = item.GetUniqueId() in hero_ids
             problems = export_ungraded_still(project, timeline, item, fps, path, node if is_hero else None,
                                              extras=True)
-            colours[name] = item.GetClipColor() or ""
+            colours[name] = scene_flag.get(item.GetUniqueId()) or item.GetClipColor() or ""
             report.append(f"  {name}: Linear is node {node} of layer {LINEAR_LAYER}"
                           + (f"; {'; '.join(problems)}" if problems else ""))
             if path.exists():
@@ -981,18 +1019,24 @@ def run_in_resolve(apply: bool = False) -> int:
             assigned = {}
         else:
             order = [name for name, _, _ in stills]
-            assigned = assign_heroes(order, {n: scene_signature(load_still(paths[n])) for n in order},
-                                     heroes, colours)
+            if scene_flag:   # colours holds each clip's scene flag, one hero per colour
+                by_flag = {colours[h]: h for h in heroes}
+                assigned = {n: (by_flag[colours[n]], "") for n in order if n not in heroes}
+            else:
+                assigned = assign_heroes(order, {n: scene_signature(load_still(paths[n])) for n in order},
+                                         heroes, colours)
             scenes = {h: [(h, paths[h])] + [(n, paths[n]) for n in order if n in assigned and assigned[n][0] == h]
                       for h in heroes}
         runs = []
         for k, (hero_name, members) in enumerate(scenes.items(), 1):
             item, node = targets[hero_name]
+            flag = f" ({colours[hero_name]})" if scene_flag else ""
             if len(heroes) > 1:
-                print(f"\n  Scene {k} of {len(scenes)}: hero {hero_name}, {len(members) - 1} shots")
+                print(f"\n  Scene {k} of {len(scenes)}{flag}: hero {hero_name}, {len(members) - 1} shots")
             hero_node = measure_hero_node(project, timeline, item, fps, node, load_still(paths[hero_name]),
                                           still_dir / f"_hero_off_{k}.tif")
-            scene_dir = out_dir if len(heroes) == 1 else out_dir / f"scene_{k:02d}"
+            scene_dir = (out_dir if len(heroes) == 1
+                         else out_dir / (f"scene_{k:02d}_{colours[hero_name]}" if scene_flag else f"scene_{k:02d}"))
             rows = match_stills(members, hero_name, scene_dir, hero_node)
             for r in rows:
                 how = assigned.get(r["clip"], ("", ""))[1]
