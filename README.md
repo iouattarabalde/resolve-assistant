@@ -52,20 +52,54 @@ First-pass shot matching on the Color page. Park the playhead on the hero, selec
 clips of the scene, run the script. Each clip is matched to the hero as graded, with Gain
 R/G/B only, in the node labelled `Linear` at the head of layer 3.
 
+Several scenes in one run: flag every clip of a scene in that scene's colour (scene 1 Blue,
+scene 2 Cyan...), grade the Linear node of one hero per scene and give that hero the Green
+flag as well (Green is the hero flag, `HERO_FLAG`). Select the whole timeline
+and run. Clips with no scene flag are left as they are. The run stops if a scene has no
+hero or two, or a clip carries two scene colours. Each scene gets its own table and folder
+(`scene_01_Blue/`...). Collect always uses the playhead hero.
+
+Without scene flags, flagged heroes still work the old way: each shot goes to the hero it
+shares most with (colours and their brightness against the frame's median), its two
+neighbours on each side voting, and a shot with the clip colour of exactly one hero goes to
+that hero. On a real 214-clip episode that mixed scenes, so prefer the flags.
+
 Install it twice in
 `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\`:
 
 | Saved as | Does |
 |---|---|
-| `Shot Match Preview.py` | prints the values, saves stills, a CSV and a before/after contact sheet to `Documents/ShotMatch/`. Writes nothing into the grade |
+| `Shot Match Preview.py` | prints the values, saves a CSV and a before/after contact sheet to `Documents/ShotMatch/`. Writes nothing into the grade. |
 | `Shot Match Apply.py` | the same, then writes Gain into each shot's Linear node. The hero is left as it is |
+| `Shot Match Collect.py` | on a scene you matched by hand: measures what each Linear node does and saves it to `Documents/ShotMatch/collect_*/`. Writes nothing into the grade |
+| `Shot Match Collect Final.py` | the same, on a finished scene, plus each clip with its whole grade on (`final/`), to see what the finished grade lines up. Writes nothing into the grade |
 
 The file decides from its own name : only a name containing "Apply" writes. Output appears in
-Workspace > Console; the first line says PREVIEW or APPLY.
+Workspace > Console; the first line says PREVIEW, APPLY or COLLECT.
+
+Collect exports each clip twice, Linear node off then on, with every other node of layers 3
+and 4 off both times, so only the Linear node is measured. Its Gain, Gamma and Offset per
+channel are fitted to the pair (within 0.01 of the wheels on a real 21.1 scene). One Offset
+unit is only 0.0073 linear, so an untouched wheel would read anywhere from 24.9 to 25.3:
+Offset is reported as used only when it sits 0.25 unit or more from 25 and clearly explains
+the frame better; otherwise it reads "not used". A node with curves or saturation is flagged. It saves the
+stills with the node off, the hero with it on (`hero_graded.tif`) and `truth.json`, zips
+them, keeps only the zip and opens Explorer on it.
+
+`Documents/ShotMatch/` stays small : Preview and Apply delete their stills (12 MB a clip)
+once solved and keep the CSV, the contact sheet and the list of clips written. At the start
+of every run, runs older than 30 days are deleted (`KEEP_DAYS`). Only the names the script
+creates are touched; anything else in that folder is left alone. Each collected scene is one
+more scene to score and tune the solver on:
+
+```
+python shot_match.py --bench FOLDER [FOLDER ...]    # solver vs hand, per shot and overall
+```
 
 What it does to the project while it runs :
 
-- moves the playhead to the middle frame of each clip, and back where it was at the end;
+- exports the middle frame of each clip with `ExportFrame` (21.1.2), without moving the playhead, plus two smaller frames (at 20 % and 80 % of the clip) that the solver pools with it; on older versions it moves the playhead to the middle frame only, and back;
+- prints its progress and the time left in the Console every 10 s;
 - switches off every node of layers 3 and 4 and of the group Post-Clip graph (the hero's
   Linear node stays on), exports a still, then switches them back on. The API has no way to
   read whether a node was already off, so a node you had switched off yourself comes back on;
@@ -87,7 +121,20 @@ How it matches : exposure from the surfaces both shots share (pixels grouped by 
 group votes how many stops apart the shots are), pulled 40 % towards skin when both frames
 show skin. Skin comes from MediaPipe's multiclass selfie segmenter; without MediaPipe it
 matches on surfaces only. White balance from the same colour groups. Tuned on two scenes
-against hand matches : within ⅓ stop on 6 of 7 and 10 of 11 shots.
+against hand matches.
+
+Shots of one camera angle get one Gain, as in a hand first pass: shots whose thumbnails
+correlate above 0.9 form a group and take its median Gain, or the hero's own Gain when the
+hero is in it. A shot solved more than ⅓ stop from its group keeps its own value (the light
+moved). The hero is also exported with its Linear node off, to measure its Gain, Gamma and Offset:
+shots are solved under the hero's Gamma and Offset. Apply writes all three through
+`SetCDL`: the shot's Gain as Slope, the hero's Offset as CDL Offset, its Gamma as Power.
+Which wheels Resolve shows them on is up to Resolve (a CDL Offset does not move the Offset
+wheel), so after writing, Apply exports each shot with only its Linear node on and checks
+on the image that the node does what was intended; a gap over 0.05 stop is reported.
+
+Bench, three scenes and 32 shots matched by hand : 31 within ⅓ stop, exposure error RMS
+0.18 stop, white balance RMS 0.07 stop.
 
 ```
 python shot_match.py --stills FOLDER    # offline, on DaVinci Intermediate TIFFs, one named *HERO*
@@ -108,4 +155,5 @@ python -m unittest tests.test_shot_match tests.test_shot_match_resolve -v
 The first builds a hero and a shot one stop brighter and slightly warmer, framed
 differently, and checks the solver gives the inverse gain. The second runs the Resolve side
 against a fake Resolve : which nodes are off at export, the playhead and nodes restored,
-and Gain written to the shot only in apply mode.
+and Gain written to the shot only in apply mode; Collect measuring a known hand Gain and
+the bench scoring it.
