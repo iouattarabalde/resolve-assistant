@@ -57,7 +57,8 @@ MANIFEST = {
         {"id": "hero_flag", "label": "Hero flag (several scenes in one run)", "type": "choice", "default": "Green",
          "choices": ["Blue", "Cyan", "Green", "Yellow", "Red", "Pink", "Purple", "Fuchsia", "Rose", "Lavender",
                      "Sky", "Mint", "Lemon", "Sand", "Cocoa", "Cream"],
-         "help": "Flag one hero per scene in this colour and select them all. No flagged clip: the hero is under the playhead."},
+         "help": "Several scenes: flag each scene's clips in its own colour, and its hero in this colour too. "
+                 "No flagged hero: the hero is the clip under the playhead."},
         {"id": "keep_light", "label": "Keep part of a big light difference", "type": "bool", "default": True,
          "help": "Past 1/2 stop from the hero, only 30 % of the rest is corrected."},
     ],
