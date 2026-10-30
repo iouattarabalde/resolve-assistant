@@ -329,7 +329,7 @@ def glob_escape(text: str) -> str:
 
 
 def match_stills(stills: list[tuple[str, Path]], hero_name: str, out_dir: Path,
-                 hero_node: dict | None = None) -> list[dict]:
+                 hero_node: dict | None = None, notes: dict | None = None) -> list[dict]:
     """stills: (clip name, still path), the hero as graded. Writes match_values.csv and
     contact_sheet.jpg. hero_node: the hero's Linear node as measured (Gain, Gamma, Offset).
     The hero is taken back before its Gamma and Offset, so each Gain is the one that, under
@@ -376,6 +376,9 @@ def match_stills(stills: list[tuple[str, Path]], hero_name: str, out_dir: Path,
         rows.append(r)
     progress.step(len(stills))
     skin_finder.close()
+    for r in rows:
+        if (notes or {}).get(r["clip"]):
+            r["note"] = (r["note"] + "; " if r["note"] else "") + notes[r["clip"]]
     group_by_angle(rows, prints, hero_node["gain"] if hero_node else None)
     for r in rows:
         lin = decode_intermediate(thumbs.pop(r["clip"]).astype(np.float64))
@@ -425,6 +428,12 @@ def assign_heroes(order: list[str], signatures: dict, heroes: list[str], colours
             row = row / max(row.max(), 1e-9)
         scores.append(row)
     scores = np.array(scores)
+    # Subclips of one recording (CAMA_0004_S003, CAMA_0004_S011...) were shot in one place and
+    # light: each also hears the others of its recording
+    takes = {}
+    for i, n in enumerate(order):
+        takes.setdefault(take_name(n), []).append(i)
+    take_vote = np.array([scores[takes[take_name(n)]].mean(0) for n in order])
     out = {}
     for i, n in enumerate(order):
         if n in heroes:
@@ -433,13 +442,21 @@ def assign_heroes(order: list[str], signatures: dict, heroes: list[str], colours
             out[n] = (forced[n], "hero by clip colour")
             continue
         near = scores[max(0, i - ASSIGN_NEIGHBOURS):i + ASSIGN_NEIGHBOURS + 1].mean(0)
-        total = scores[i] + near
+        total = scores[i] + near + take_vote[i]
         top = np.argsort(total)[::-1]
         how = ""
         if len(heroes) > 1 and total[top[0]] - total[top[1]] < CLOSE_CALL:
             how = f"check its hero: close call with {heroes[top[1]][:24]}"
         out[n] = (heroes[top[0]], how)
     return out
+
+
+def take_name(name: str) -> str:
+    """The recording a clip comes from: its name without the numbering this script adds
+    (12_), the subclip suffix (_S003) and the extension."""
+    stem = re.sub(r"^\d+_", "", name)
+    stem = re.sub(r"\.[A-Za-z0-9]{2,4}$", "", stem)
+    return re.sub(r"_S\d{3}$", "", stem)
 
 
 def camera_tag(name: str) -> str | None:
@@ -1082,14 +1099,17 @@ def run_in_resolve(apply: bool = False, confirmed: bool = False) -> int:
                                           still_dir / f"_hero_off_{k}.tif")
             scene_dir = (out_dir if len(heroes) == 1
                          else out_dir / (f"scene_{k:02d}_{colours[hero_name]}" if scene_flag else f"scene_{k:02d}"))
-            rows = match_stills(members, hero_name, scene_dir, hero_node)
-            for r in rows:
-                how = assigned.get(r["clip"], ("", ""))[1]
-                if how:
-                    r["note"] = (r["note"] + "; " if r["note"] else "") + how
+            rows = match_stills(members, hero_name, scene_dir, hero_node,
+                                {n: how for n, (_, how) in assigned.items()})
             print_table(rows, hero_node)
             runs.append((rows, hero_node, scene_dir))
         if apply:
+            # A shot whose hero is a close call is not written: a wrong hero is worse than none
+            unsure = [n for n, (_, how) in assigned.items() if how.startswith("check its hero")]
+            if unsure:
+                targets = {n: t for n, t in targets.items() if n not in unsure}
+                print(f"\n  {len(unsure)} shots with an unsure hero will NOT be written. Give each one its "
+                      "hero's clip colour and run again:\n    " + "\n    ".join(unsure))
             count = sum(1 for rows, _, _ in runs for r in rows
                         if r["gain"] is not None and r["note"] != "hero" and r["clip"] in targets)
             if confirmed or confirm_write(resolve, count, hero_text):

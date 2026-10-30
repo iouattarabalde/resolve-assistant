@@ -184,7 +184,22 @@ class ResolveFlowTest(unittest.TestCase):
             shot_match.run_in_resolve(apply=False)
         self.assertIn("hero by clip colour", out.getvalue())
         run = next(Path(self.tmp.name).glob("2*"))
-        self.assertIn("shot_a", (run / "scene_02" / "match_values.csv").read_text())
+        csv_text = (run / "scene_02" / "match_values.csv").read_text()
+        self.assertIn("shot_a", csv_text)
+        self.assertIn("hero by clip colour", csv_text)   # the assignment reaches the CSV too
+
+    def test_unsure_hero_is_not_written(self):
+        hero_a, hero_b, shot_a, shot_b = self.two_scenes()
+        sure = shot_match.assign_heroes
+        def unsure(order, sigs, heroes, colours):
+            got = sure(order, sigs, heroes, colours)
+            got["04_shot_a"] = (got["04_shot_a"][0], "check its hero: close call with 01_hero_a")
+            return got
+        with mock.patch.object(shot_match, "assign_heroes", unsure), mock.patch("sys.stdout", io.StringIO()) as out:
+            shot_match.run_in_resolve(apply=True)
+        self.assertIsNone(shot_a.cdl)
+        self.assertIsNotNone(shot_b.cdl)
+        self.assertIn("1 shots with an unsure hero will NOT be written", out.getvalue())
 
     def flag_scenes(self):
         """The two intercut scenes, every clip flagged in its scene's colour, heroes Green too."""
