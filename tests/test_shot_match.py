@@ -91,6 +91,10 @@ class SolverTest(unittest.TestCase):
         got = shot_match.assign_heroes(order, sigs, ["HA", "HB"], {"HA": "Teal", "s2": "Teal"})
         self.assertEqual(got["s2"], ("HA", "hero by clip colour"))
 
+    def test_take_name_drops_numbering_subclip_and_extension(self):
+        self.assertEqual(shot_match.take_name("51_AGRI_camA_20260924_0004_S007.MXF"), "AGRI_camA_20260924_0004")
+        self.assertEqual(shot_match.take_name("18_DJI_20260924_110032.mov"), "DJI_20260924_110032")
+
     def test_hero_is_neutral(self):
         rows = shot_match.match_stills([("A", self.folder / "A_HERO.tif"), ("B", self.folder / "B.tif")],
                                        "A", self.folder / "out")
