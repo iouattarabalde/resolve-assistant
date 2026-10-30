@@ -94,6 +94,7 @@ KEEP_LIGHT_SHARE = 0.3     # share of the gap beyond KEEP_LIGHT_FROM that is cor
 SKIN_WB_SHARE = 0.3       # share of the white balance taken from skin hue
 SKIN_WEIGHT = 0.1   # 0.4 until 2026-10-28; 0.1 scores best on the 4 bench scenes (56/60)
 MIN_SKIN_PIXELS = 300      # at 1/4 resolution
+KEEP_LIGHT = True          # False: close the whole gap to the hero, whatever its size
 SAME_ANGLE = 0.9           # thumbnail correlation above which two shots are one camera angle
 LIGHT_CHANGE_STOPS = 1 / 3 # a shot solved this far from its group keeps its own value
 WB_BINS, WB_STEP, WB_ITERATIONS = 24, 0.5, 3
@@ -161,12 +162,16 @@ class SkinFinder:
     def __init__(self):
         self.segmenter, self.reason = None, ""
         try:
+            stub_unused_mediapipe_deps()
             os.environ.setdefault("GLOG_minloglevel", "2")       # its TensorFlow Lite INFO/WARNING lines
             os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
             import mediapipe as mp
             from mediapipe.tasks.python import BaseOptions, vision
         except ImportError:
             self.reason = "mediapipe is not installed"
+            return
+        except Exception as exc:  # a broken install must not stop the match either
+            self.reason = f"mediapipe could not load ({type(exc).__name__}: {exc})"
             return
         try:
             if not MODEL_PATH.exists():
@@ -195,6 +200,23 @@ class SkinFinder:
     def close(self):
         if self.segmenter is not None:
             self.segmenter.close()   # before interpreter shutdown, or MediaPipe errors on exit
+
+
+def stub_unused_mediapipe_deps() -> None:
+    """MediaPipe imports OpenCV, matplotlib and sounddevice at load time for its drawing and
+    audio helpers, which the segmenter never calls. MagicScript installs it without them
+    (OpenCV's Windows wheel carries an LGPL FFmpeg), so empty modules stand in when absent."""
+    import importlib.util
+    import types
+    for top, subs in (("cv2", ()), ("matplotlib", ("pyplot",)), ("sounddevice", ())):
+        # Only the top-level name goes to find_spec: once a stub is in sys.modules it has no
+        # spec, and find_spec("matplotlib") then raises (seen on Shark, 2026-10-29)
+        if top in sys.modules or importlib.util.find_spec(top) is not None:
+            continue
+        sys.modules[top] = types.ModuleType(top)
+        for sub in subs:
+            sys.modules[f"{top}.{sub}"] = types.ModuleType(f"{top}.{sub}")
+            setattr(sys.modules[top], sub, sys.modules[f"{top}.{sub}"])
 
 
 # ─── solver ─────────────────────────────────────────────────────
@@ -260,7 +282,7 @@ def keep_light(exposure: float) -> float:
     shade of a shelter), which a first pass keeps: close the first KEEP_LIGHT_FROM stops,
     then only KEEP_LIGHT_SHARE of the rest. Tuned on the 5 bench scenes, 2026-10-28."""
     size = abs(exposure)
-    if size <= KEEP_LIGHT_FROM:
+    if not KEEP_LIGHT or size <= KEEP_LIGHT_FROM:
         return exposure
     return float(np.sign(exposure) * (KEEP_LIGHT_FROM + (size - KEEP_LIGHT_FROM) * KEEP_LIGHT_SHARE))
 
@@ -315,7 +337,7 @@ def match_stills(stills: list[tuple[str, Path]], hero_name: str, out_dir: Path,
     of the hero's angle get the hero's own Gain."""
     skin_finder = SkinFinder()
     if skin_finder.reason:
-        print(f"  Skin: off, {skin_finder.reason}. Matching on surfaces only.")
+        say(f"  Skin: off, {skin_finder.reason}. Matching on surfaces only.")
     # Only a thumbnail and a fingerprint of each clip stay in memory: a full frame is about
     # 50 MB, too much to hold for an episode of 200 shots
     prints, thumbs = {}, {}
@@ -517,14 +539,14 @@ def print_table(rows: list[dict], hero_node: dict | None = None) -> None:
     power, lift = node_parts(hero_node)
     gamma = " ".join(f"{gamma_wheel(p):+.2f}" for p in power)
     offset = " ".join(f"{25 + v / OFFSET_STEP:.2f}" for v in lift)
-    print(f"\n  Linear node, Gain R / G / B (Offset {offset}, Gamma {gamma} as on the hero), matched to the hero as graded.")
+    say(f"\n  Linear node, Gain R / G / B (Offset {offset}, Gamma {gamma} as on the hero), matched to the hero as graded.")
     for r in rows:
         g = r["gain"]
         if g is None:
-            print(f"  {r['clip'][:40]:40s}  skipped: {r['note']}")
+            say(f"  {r['clip'][:40]:40s}  skipped: {r['note']}")
             continue
         note = "  (hero)" if r["note"] == "hero" else (f"  {r['note']}" if r["note"] else "")
-        print(f"  {r['clip'][:40]:40s}  {g[0]:.2f}  {g[1]:.2f}  {g[2]:.2f}   {np.log2(luma(g)):+.2f} stops{note}")
+        say(f"  {r['clip'][:40]:40s}  {g[0]:.2f}  {g[1]:.2f}  {g[2]:.2f}   {np.log2(luma(g)):+.2f} stops{note}")
 
 
 # ─── Resolve ────────────────────────────────────────────────────
@@ -610,7 +632,7 @@ def run_bench(folders: list[Path]) -> int:
         # Shots are matched to the hero as graded, as in Resolve
         stills = [(n, folder / "hero_graded.tif" if n == hero else p) for n, p in stills]
         rows = match_stills(stills, hero, folder / "_bench", truth["clips"][hero])
-        print(f"\n  {folder.name}  (hero {hero})\n  clip                                      solver   hand    error")
+        say(f"\n  {folder.name}  (hero {hero})\n  clip                                      solver   hand    error")
         for r in rows:
             if r["note"] == "hero" or r["gain"] is None:
                 continue
@@ -623,11 +645,11 @@ def run_bench(folders: list[Path]) -> int:
             wb = float(np.log2(r["gain"][2] / r["gain"][0]) - np.log2(hand_gain[2] / hand_gain[0]))
             errors.append((ev - hand_ev, wb))
             flag = "" if abs(ev - hand_ev) <= 1 / 3 else "   <-- over 1/3 stop"
-            print(f"  {r['clip'][:40]:40s}  {ev:+.2f}   {hand_ev:+.2f}   {ev - hand_ev:+.2f}{flag}")
+            say(f"  {r['clip'][:40]:40s}  {ev:+.2f}   {hand_ev:+.2f}   {ev - hand_ev:+.2f}{flag}")
     if not errors:
         raise Stop("No shots to score.")
     ev_err, wb_err = np.array(errors).T
-    print(f"\n  {len(errors)} shots. Exposure error RMS {np.sqrt(np.mean(ev_err ** 2)):.2f}, "
+    say(f"\n  {len(errors)} shots. Exposure error RMS {np.sqrt(np.mean(ev_err ** 2)):.2f}, "
           f"max {np.abs(ev_err).max():.2f} stops, {int((np.abs(ev_err) <= 1 / 3).sum())} within 1/3 stop. "
           f"White balance (B/R) RMS {np.sqrt(np.mean(wb_err ** 2)):.2f} stops.")
     return 0
@@ -652,7 +674,7 @@ class Progress:
             say(f"  {self.label}: {done}/{self.total}, about {clock(spent / done * (self.total - done))} left")
 
 
-def say(text: str) -> None:
+def say(text) -> None:
     """print, flushed where the stream allows: Resolve's Console stream (fu_stdout) has no
     flush and raises on print(..., flush=True)."""
     print(text)
@@ -671,15 +693,36 @@ class Stop(Exception):
     """A plain-language reason to stop, printed as is."""
 
 
+def configure(layer=None, label=None, out_root=None, keep_light=None, hero_flag=None) -> None:
+    """Settings from the command line (MagicScript's dialog), in place of the constants above.
+    The layers switched off for capture are the shot and scene layers plus the Linear node's own."""
+    global LINEAR_LAYER, LINEAR_LABEL, OUT_ROOT, KEEP_LIGHT, CAPTURE_OFF_LAYERS, HERO_FLAG
+    if layer is not None:
+        LINEAR_LAYER = int(layer)
+        CAPTURE_OFF_LAYERS = tuple(sorted({3, 4, LINEAR_LAYER}))
+    if label:
+        LINEAR_LABEL = label
+    if out_root:
+        OUT_ROOT = Path(out_root)
+    if keep_light is not None:
+        KEEP_LIGHT = bool(keep_light)
+    if hero_flag:
+        HERO_FLAG = hero_flag
+
+
 def get_resolve():
     injected = globals().get("resolve")   # the Scripts menu provides it
     if injected:
         return injected
     try:
-        import DaVinciResolveScript as dvr
+        import DaVinciResolveScript as dvr   # ResolvePython has it built in (MagicScript runs us there)
     except ImportError:
-        raise Stop("Run this from Workspace > Scripts inside Resolve, or set up the Resolve "
-                   "scripting environment variables for the terminal.")
+        dll = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Blackmagic Design" / "DaVinci Resolve" / "fusionscript.dll"
+        if sys.platform != "win32" or not dll.exists():
+            raise Stop("Run this from Workspace > Scripts inside Resolve, or set up the Resolve "
+                       "scripting environment variables for the terminal.")
+        import importlib.machinery
+        dvr = importlib.machinery.ExtensionFileLoader("fusionscript", str(dll)).load_module()
     r = dvr.scriptapp("Resolve")
     if not r:
         raise Stop("Resolve is not running, or external scripting is off "
@@ -791,7 +834,7 @@ def confirm_write(resolve, count: int, hero_text: str) -> bool:
     bmd = globals().get("bmd")   # the Scripts menu provides it, a terminal does not
     ui = fu.UIManager if fu else None
     if not ui or not bmd:
-        print("\n  Could not open the confirm window, so nothing was written. "
+        say("\n  Could not open the confirm window, so nothing was written. "
               "Run Shot Match Apply from Workspace > Scripts.")
         return False
     disp = bmd.UIDispatcher(ui)
@@ -843,10 +886,10 @@ def write_gains(rows: list[dict], targets: dict, out_dir: Path, hero_node: dict 
                "Power": f"{power[0]:.4f} {power[1]:.4f} {power[2]:.4f}", "Saturation": "1.0000"}
         (written if item.SetCDL(cdl) else failed).append(r["clip"])
     with open(out_dir / "written.txt", "w") as f:
-        f.write("Written to the Linear node (layer 3) of:\n" + "\n".join(written) + "\n")
+        f.write(f"Written to the {LINEAR_LABEL} node (layer {LINEAR_LAYER}) of:\n" + "\n".join(written) + "\n")
         if failed:
             f.write("\nSetCDL refused:\n" + "\n".join(failed) + "\n")
-    print(f"\n  Written: {len(written)} clips." + (f" REFUSED: {', '.join(failed)}" if failed else ""))
+    say(f"\n  Written: {len(written)} clips." + (f" REFUSED: {', '.join(failed)}" if failed else ""))
     return written
 
 
@@ -883,9 +926,9 @@ def verify_written(project, timeline, fps: int, rows: list[dict], targets: dict,
     finally:
         timeline.SetCurrentTimecode(start_tc)
     if bad:
-        print("  CHECK FAILED, the written nodes do not do what was intended:\n    " + "\n    ".join(bad))
+        say("  CHECK FAILED, the written nodes do not do what was intended:\n    " + "\n    ".join(bad))
     elif gaps:
-        print(f"  Checked {len(gaps)} shots on the image: the written nodes do what was intended "
+        say(f"  Checked {len(gaps)} shots on the image: the written nodes do what was intended "
               f"(within {max(gaps):.2f} stop).")
 
 
@@ -908,7 +951,7 @@ def clean_old_runs(now: datetime.datetime | None = None) -> None:
             continue
         removed, freed = removed + 1, freed + size
     if removed:
-        print(f"  Cleaned {OUT_ROOT}: {removed} runs older than {KEEP_DAYS} days deleted, {freed / 1e6:.0f} MB freed.")
+        say(f"  Cleaned {OUT_ROOT}: {removed} runs older than {KEEP_DAYS} days deleted, {freed / 1e6:.0f} MB freed.")
 
 
 def open_scene(flags: bool = True):
@@ -970,7 +1013,8 @@ def scenes_by_flag(clips: list, heroes: list) -> dict:
     return colour
 
 
-def run_in_resolve(apply: bool = False) -> int:
+def run_in_resolve(apply: bool = False, confirmed: bool = False) -> int:
+    """confirmed: the host already asked before writing (MagicScript's destructive tick)."""
     resolve, project, timeline, fps, hero_items, clips = open_scene()
     hero_ids = {h.GetUniqueId() for h in hero_items}
     scene_flag = scenes_by_flag(clips, hero_items)
@@ -989,12 +1033,12 @@ def run_in_resolve(apply: bool = False) -> int:
     still_dir = out_dir / "stills"
     still_dir.mkdir(parents=True, exist_ok=True)
     if apply:
-        print(f"Shot match APPLY: {len(clips)} clips, {hero_text}. "
+        say(f"Shot match APPLY: {len(clips)} clips, {hero_text}. "
               "Gain will be written into each Linear node, the heroes' are left as they are.\n"
               f"  It writes into the layer the node editor shows: layer {LINEAR_LAYER} must be on screen.\n"
               "  A window asks you to confirm before anything is written.")
     else:
-        print(f"Shot match preview: {len(clips)} clips, {hero_text}. Nothing is written to the grade.")
+        say(f"Shot match preview: {len(clips)} clips, {hero_text}. Nothing is written to the grade.")
 
     stills, report, targets, colours = [], [], {}, {}
     try:
@@ -1005,14 +1049,14 @@ def run_in_resolve(apply: bool = False) -> int:
             name = f"{n:02d}_{item.GetName()}"
             node = linear_node(item)
             if node is None:
-                report.append(f"  {name}: skipped, needs exactly one node labelled Linear in layer {LINEAR_LAYER}")
+                report.append(f"  {name}: skipped, needs exactly one node labelled {LINEAR_LABEL} in layer {LINEAR_LAYER}")
                 continue
             path = still_dir / f"{name}.tif"
             is_hero = item.GetUniqueId() in hero_ids
             problems = export_ungraded_still(project, timeline, item, fps, path, node if is_hero else None,
                                              extras=True)
             colours[name] = scene_flag.get(item.GetUniqueId()) or item.GetClipColor() or ""
-            report.append(f"  {name}: Linear is node {node} of layer {LINEAR_LAYER}"
+            report.append(f"  {name}: {LINEAR_LABEL} is node {node} of layer {LINEAR_LAYER}"
                           + (f"; {'; '.join(problems)}" if problems else ""))
             if path.exists():
                 stills.append((name, path, is_hero))
@@ -1020,7 +1064,7 @@ def run_in_resolve(apply: bool = False) -> int:
         progress.step(len(clips))
     finally:
         timeline.SetCurrentTimecode(start_tc)
-    print("\n".join(report))
+    say("\n".join(report))
 
     try:
         heroes = [name for name, _, is_hero in stills if is_hero]
@@ -1031,7 +1075,7 @@ def run_in_resolve(apply: bool = False) -> int:
         extra = [tifffile.imread(str(x)) for x in extra_paths(paths[heroes[0]])]
         extra_format = (f"; {len(extra)} more frames a clip, {extra[0].shape[1]}x{extra[0].shape[0]}, "
                         f"{extra[0].dtype}" if extra else "")
-        print(f"\n  Still format: {sample.shape[1]}x{sample.shape[0]}, {sample.dtype}{extra_format}")
+        say(f"\n  Still format: {sample.shape[1]}x{sample.shape[0]}, {sample.dtype}{extra_format}")
         if len(heroes) == 1:
             scenes = {heroes[0]: [(n, p) for n, p, _ in stills]}
             assigned = {}
@@ -1050,7 +1094,7 @@ def run_in_resolve(apply: bool = False) -> int:
             item, node = targets[hero_name]
             flag = f" ({colours[hero_name]})" if scene_flag else ""
             if len(heroes) > 1:
-                print(f"\n  Scene {k} of {len(scenes)}{flag}: hero {hero_name}, {len(members) - 1} shots")
+                say(f"\n  Scene {k} of {len(scenes)}{flag}: hero {hero_name}, {len(members) - 1} shots")
             hero_node = measure_hero_node(project, timeline, item, fps, node, load_still(paths[hero_name]),
                                           still_dir / f"_hero_off_{k}.tif")
             scene_dir = (out_dir if len(heroes) == 1
@@ -1068,15 +1112,15 @@ def run_in_resolve(apply: bool = False) -> int:
                       "hero's clip colour and run again:\n    " + "\n    ".join(unsure))
             count = sum(1 for rows, _, _ in runs for r in rows
                         if r["gain"] is not None and r["note"] != "hero" and r["clip"] in targets)
-            if confirm_write(resolve, count, hero_text):
+            if confirmed or confirm_write(resolve, count, hero_text):
                 for rows, hero_node, scene_dir in runs:
                     write_gains(rows, targets, scene_dir, hero_node)
                     verify_written(project, timeline, fps, rows, targets, paths, hero_node, still_dir)
             else:
-                print("\n  Cancelled: nothing written.")
+                say("\n  Cancelled: nothing written.")
     finally:
         shutil.rmtree(still_dir, ignore_errors=True)   # 12 MB a clip; the contact sheet shows them
-    print(f"\n  Values and contact sheet: {out_dir}")
+    say(f"\n  Values and contact sheet: {out_dir}")
     return 0
 
 
@@ -1089,11 +1133,11 @@ def measure_hero_node(project, timeline, hero, fps: int, node: int, graded: np.n
         timeline.SetCurrentTimecode(start_tc)
     m = measure_node(load_still(path), graded) if path.exists() else None
     if m is None:
-        print("  Hero's Linear node: could not be measured" + (f" ({'; '.join(problems)})" if problems else "")
+        say("  Hero's Linear node: could not be measured" + (f" ({'; '.join(problems)})" if problems else "")
               + ". Shots are matched without its Gamma.")
         return None
     if m["misfit_stops"] > 0.1:
-        print("  Hero's Linear node does more than Gain, Gamma and Offset (curves?): values are approximate.")
+        say("  Hero's Linear node does more than Gain, Gamma and Offset (curves?): values are approximate.")
     return m
 
 
@@ -1111,7 +1155,7 @@ def run_collect(final: bool = False) -> int:
     graded_dir.mkdir()
     if final:
         (out_dir / "final").mkdir()
-    print(f"Shot match COLLECT{' FINAL' if final else ''}: {len(clips)} clips, hero {hero.GetName()}. "
+    say(f"Shot match COLLECT{' FINAL' if final else ''}: {len(clips)} clips, hero {hero.GetName()}. "
           "Measures your Linear nodes; nothing is written to the grade.")
     truth, report, hero_name = {}, [], None
     try:
@@ -1122,7 +1166,7 @@ def run_collect(final: bool = False) -> int:
             name = f"{n:02d}_{item.GetName()}"
             node = linear_node(item)
             if node is None:
-                report.append(f"  {name}: skipped, needs exactly one node labelled Linear in layer {LINEAR_LAYER}")
+                report.append(f"  {name}: skipped, needs exactly one node labelled {LINEAR_LABEL} in layer {LINEAR_LAYER}")
                 continue
             off, on = still_dir / f"{name}.tif", graded_dir / f"{name}.tif"
             is_hero = item.GetUniqueId() == hero.GetUniqueId()
@@ -1150,20 +1194,20 @@ def run_collect(final: bool = False) -> int:
         for leftover in graded_dir.glob("*.tif"):
             leftover.unlink()
         graded_dir.rmdir()
-    print("\n".join(report))
+    say("\n".join(report))
     if hero_name is None:
         raise Stop("The hero could not be measured, so nothing was saved. See the lines above.")
     (out_dir / "truth.json").write_text(json.dumps({"hero": hero_name, "clips": truth}, indent=1))
-    print("\n  Your Linear node as measured:  Gain R / G / B    Gamma R / G / B    Offset R / G / B")
+    say("\n  Your Linear node as measured:  Gain R / G / B    Gamma R / G / B    Offset R / G / B")
     for name, m in truth.items():
         g, y, o = m["gain"], m["gamma"], m["offset"]
         offset = f"{o[0]:.2f} {o[1]:.2f} {o[2]:.2f}" if m["offset_used"] else "not used"
-        print(f"  {name[:40]:40s}  {g[0]:.2f}  {g[1]:.2f}  {g[2]:.2f}    {y[0]:+.2f} {y[1]:+.2f} {y[2]:+.2f}    {offset}"
+        say(f"  {name[:40]:40s}  {g[0]:.2f}  {g[1]:.2f}  {g[2]:.2f}    {y[0]:+.2f} {y[1]:+.2f} {y[2]:+.2f}    {offset}"
               + ("  (hero)" if name == hero_name else ""))
     shrink_for_upload(out_dir)
     archive = Path(shutil.make_archive(str(out_dir), "zip", out_dir.parent, out_dir.name))
     shutil.rmtree(out_dir, ignore_errors=True)   # the zip holds it all
-    print(f"\n  Saved: {archive}\n  Send that zip: it is one more scene to tune the solver on.")
+    say(f"\n  Saved: {archive}\n  Send that zip: it is one more scene to tune the solver on.")
     show_in_file_browser(archive)
     return 0
 
@@ -1198,7 +1242,7 @@ def run_offline(folder: Path) -> int:
         raise Stop(f"Name exactly one still with HERO in it (found {len(heroes)}).")
     rows = match_stills([(p.stem, p) for p in stills], heroes[0].stem, folder / "_shot_match")
     print_table(rows)
-    print(f"\n  Values and contact sheet: {folder / '_shot_match'}")
+    say(f"\n  Values and contact sheet: {folder / '_shot_match'}")
     return 0
 
 
@@ -1206,12 +1250,26 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--stills", type=Path, help="match exported stills offline instead of driving Resolve")
     parser.add_argument("--bench", type=Path, nargs="+", help="score the solver on folders saved by Collect")
+    # MagicScript runs this file in a separate ResolvePython, connected to Resolve, with its dialog's settings
+    parser.add_argument("--resolve", choices=("preview", "apply", "collect", "collect_final"),
+                        help="drive Resolve in this mode")
+    parser.add_argument("--layer", type=int, help=f"layer of the Linear node (default {LINEAR_LAYER})")
+    parser.add_argument("--label", help=f"label of the node to measure and write (default {LINEAR_LABEL})")
+    parser.add_argument("--out", type=Path, help=f"output folder (default {OUT_ROOT})")
+    parser.add_argument("--no-keep-light", action="store_true", help="close the whole gap to the hero")
+    parser.add_argument("--hero-flag", help=f"flag colour of the heroes when several scenes run at once (default {HERO_FLAG})")
+    parser.add_argument("--confirmed", action="store_true", help="apply without the confirm window: the caller asked")
     args = parser.parse_args(argv)
+    configure(args.layer, args.label, args.out, False if args.no_keep_light else None, args.hero_flag)
     try:
         if args.stills:
             return run_offline(args.stills)
         if args.bench:
             return run_bench(args.bench)
+        if args.resolve:
+            if args.resolve.startswith("collect"):
+                return run_collect(final=args.resolve == "collect_final")
+            return run_in_resolve(apply=args.resolve == "apply", confirmed=args.confirmed)
         # The same file does three jobs, picked by the name it is saved under in the Scripts
         # folder. The Scripts menu does not set __file__, but the code object knows its file.
         stem = Path(main.__code__.co_filename).stem.lower()
@@ -1219,7 +1277,7 @@ def main(argv: list[str] | None = None) -> int:
             return run_collect(final="final" in stem)
         return run_in_resolve(apply="apply" in stem)
     except Stop as stop:
-        print(stop)
+        say(stop)
         return 2
 
 

@@ -52,9 +52,34 @@ First-pass shot matching on the Color page. Park the playhead on the hero, selec
 clips of the scene, run the script. Each clip is matched to the hero as graded, with Gain
 R/G/B only, in the node labelled `Linear` at the head of layer 3.
 
+### In MagicScript (where it lives)
+
+One script, **Shot match to the hero** (Colour), with a Mode box: Preview, Apply, Collect or
+Collect Final.
+The layer, node label, output folder, hero flag colour and "keep part of a big light difference" are boxes in
+its dialog. Build it from this repo, never edit the copies:
+
+```
+python magicscript/build.py      # -> dist/magicscript/Colour/shot_match.py + _shot_match_engine.py
+```
+
+Copy both files into
+`%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\MagicScript\scripts\Colour\` and press
+Reload. MagicScript skips files starting with `_`, so the engine (a copy of `shot_match.py`) is
+not listed. The script installs numpy, tifffile, Pillow and MediaPipe into MagicScript's
+`pydeps` on first run, then runs the engine in a separate ResolvePython connected to Resolve
+(`--resolve MODE`), so nothing compiled loads into Resolve. That needs Preferences > System >
+General > External scripting using: Local. MediaPipe goes in without OpenCV, matplotlib and
+sounddevice, which the skin segmenter never uses.
+
+The script is flagged destructive, so MagicScript asks for its "I understand" tick on every
+run, Preview and Collect included: MagicScript can only make the tick depend on a yes/no box,
+not on a choice. Apply passes `--confirmed`, so the engine's own window does not open.
+SetCDL still writes into the layer the node editor shows, hence the warning in the dialog.
+
 Several scenes in one run: flag every clip of a scene in that scene's colour (scene 1 Blue,
 scene 2 Cyan...), grade the Linear node of one hero per scene and give that hero the Green
-flag as well (Green is the hero flag, `HERO_FLAG`). Select the whole timeline
+flag as well (Green is the hero flag; pick another in the dialog). Select the whole timeline
 and run. Clips with no scene flag are left as they are. The run stops if a scene has no
 hero or two, or a clip carries two scene colours. Each scene gets its own table and folder
 (`scene_01_Blue/`...). Collect always uses the playhead hero.
@@ -63,6 +88,8 @@ Without scene flags, flagged heroes still work the old way: each shot goes to th
 shares most with (colours and their brightness against the frame's median), its two
 neighbours on each side voting, and a shot with the clip colour of exactly one hero goes to
 that hero. On a real 214-clip episode that mixed scenes, so prefer the flags.
+
+### From the Scripts menu
 
 Install it twice in
 `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\`:
@@ -149,11 +176,12 @@ and `pip install numpy tifffile pillow mediapipe`. The skin model (16 MB) is dow
 ### Tests
 
 ```
-python -m unittest tests.test_shot_match tests.test_shot_match_resolve -v
+python -m unittest tests.test_shot_match tests.test_shot_match_resolve tests.test_magicscript -v
 ```
 
 The first builds a hero and a shot one stop brighter and slightly warmer, framed
 differently, and checks the solver gives the inverse gain. The second runs the Resolve side
 against a fake Resolve : which nodes are off at export, the playhead and nodes restored,
 and Gain written to the shot only in apply mode; Collect measuring a known hand Gain and
-the bench scoring it.
+the bench scoring it. The third checks the MagicScript wrapper passes the dialog's settings
+to the engine and relays its lines and errors.
