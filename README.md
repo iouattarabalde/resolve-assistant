@@ -77,14 +77,17 @@ run, Preview and Collect included: MagicScript can only make the tick depend on 
 not on a choice. Apply passes `--confirmed`, so the engine's own window does not open.
 SetCDL still writes into the layer the node editor shows, hence the warning in the dialog.
 
-Several scenes in one run: grade the Linear node of one hero per scene, give each hero a
-Green flag, select the whole timeline and run. Each shot goes to the hero it shares most
-with (colours and their brightness against the frame's median), its two neighbours on each
-side voting too; on the bench scenes mixed into one timeline that found the right hero for
-103 shots of 110. A shot with the clip colour of exactly one hero always goes to that hero,
-which settles intercut scenes. Preview prints one table per scene and marks close calls
-"check its hero"; each scene gets its own folder (`scene_01/`...). Collect always uses the
-playhead hero.
+Several scenes in one run: flag every clip of a scene in that scene's colour (scene 1 Blue,
+scene 2 Cyan...), grade the Linear node of one hero per scene and give that hero the Green
+flag as well (Green is the hero flag; pick another in the dialog). Select the whole timeline
+and run. Clips with no scene flag are left as they are. The run stops if a scene has no
+hero or two, or a clip carries two scene colours. Each scene gets its own table and folder
+(`scene_01_Blue/`...). Collect always uses the playhead hero.
+
+Without scene flags, flagged heroes still work the old way: each shot goes to the hero it
+shares most with (colours and their brightness against the frame's median), its two
+neighbours on each side voting, and a shot with the clip colour of exactly one hero goes to
+that hero. On a real 214-clip episode that mixed scenes, so prefer the flags.
 
 ### From the Scripts menu
 

@@ -186,6 +186,50 @@ class ResolveFlowTest(unittest.TestCase):
         run = next(Path(self.tmp.name).glob("2*"))
         self.assertIn("shot_a", (run / "scene_02" / "match_values.csv").read_text())
 
+    def flag_scenes(self):
+        """The two intercut scenes, every clip flagged in its scene's colour, heroes Green too."""
+        hero_a, hero_b, shot_a, shot_b = self.two_scenes()
+        hero_a.flags, shot_a.flags = ["Blue", shot_match.HERO_FLAG], ["Blue"]
+        hero_b.flags, shot_b.flags = [shot_match.HERO_FLAG, "Cyan"], ["Cyan"]
+        # The look alone would send each shot to the other hero: the flags must win
+        shot_a.shares, shot_b.shares = hero_b.shares, hero_a.shares
+        return hero_a, hero_b, shot_a, shot_b
+
+    def test_scenes_by_flag_colour(self):
+        hero_a, hero_b, shot_a, shot_b = self.flag_scenes()
+        loose = Item("loose", 86592, np.full(3, 2.0))
+        self.timeline.items.append(loose)
+        with mock.patch("sys.stdout", io.StringIO()) as out:
+            shot_match.run_in_resolve(apply=True)
+        self.assertIn("2 scenes by flag colour", out.getvalue())
+        self.assertIn("no scene flag: loose", out.getvalue())
+        self.assertIsNone(loose.cdl)
+        self.assertNotIn("close call", out.getvalue())
+        run = next(Path(self.tmp.name).glob("2*"))
+        self.assertIn("shot_a", (run / "scene_01_Blue" / "match_values.csv").read_text())
+        self.assertIn("shot_b", (run / "scene_02_Cyan" / "match_values.csv").read_text())
+        np.testing.assert_allclose([float(v) for v in shot_a.cdl["Slope"].split()], 0.5, atol=0.05)
+
+    def test_scene_flags_need_one_hero_each(self):
+        hero_a, hero_b, shot_a, shot_b = self.flag_scenes()
+        shot_b.flags = ["Blue"]          # Cyan now only holds hero B: fine
+        hero_b.flags = [shot_match.HERO_FLAG]
+        with self.assertRaisesRegex(shot_match.Stop, "hero_b has no scene flag"):
+            shot_match.run_in_resolve()
+        hero_b.flags = ["Blue", shot_match.HERO_FLAG]
+        with self.assertRaisesRegex(shot_match.Stop, "Scene Blue has 2 clips"):
+            shot_match.run_in_resolve()
+        hero_b.flags, shot_b.flags = [shot_match.HERO_FLAG, "Cyan"], ["Cyan", "Pink"]
+        with self.assertRaisesRegex(shot_match.Stop, "one scene colour a clip"):
+            shot_match.run_in_resolve()
+
+    def test_scene_flags_without_green_hero_stop(self):
+        hero_a, hero_b, shot_a, shot_b = self.flag_scenes()
+        hero_a.flags, hero_b.flags = ["Blue"], ["Cyan"]
+        self.timeline.hero = hero_a      # playhead hero, but two scenes
+        with self.assertRaisesRegex(shot_match.Stop, "Scene Cyan has no clip"):
+            shot_match.run_in_resolve()
+
     def test_all_clips_flagged_stops(self):
         for item in self.timeline.items:
             item.flags = [shot_match.HERO_FLAG]
