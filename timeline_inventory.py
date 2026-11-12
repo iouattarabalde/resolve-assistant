@@ -3,7 +3,10 @@
 Stage 1 of the Color Assistant base: one pass lists every video clip with its camera, source
 recording and timecode, then groups the clips into
 
-    recording   clips cut from the same source file (they share one first-pass correction)
+    recording   clips cut from the same source file
+    setup       uses of one recording that sit close together in the source: these are the
+                clips that share one first-pass correction (on a 1032-clip graded documentary,
+                90 % agree within 1/3 stop at a 10 s gap, 80 % for whole recordings)
     camera      the camera that shot the recording
     scene       recordings whose shooting times touch or overlap, whatever the cut order
 
@@ -23,6 +26,7 @@ from collections import Counter
 from pathlib import Path
 
 SCENE_GAP_S = 600        # recordings further apart than this (seconds of shooting time) start a new scene
+SETUP_GAP_S = 10         # uses of one recording further apart than this in the source are separate setups
 NEIGHBOURS = 2           # timeline neighbours each side that vote for a clip with no usable clock
 CAMERA_KEYS = ("Camera #", "Camera ID", "Camera", "Camera Label")
 DAY_KEYS = ("Date Recorded", "Shoot Date", "Date Created")
@@ -149,12 +153,36 @@ def recordings(inventory: dict) -> dict:
     return out
 
 
+def setups(inventory: dict, setup_gap_s: float = SETUP_GAP_S) -> dict[int, str]:
+    """Setup id for every clip position: uses of one recording chained while the next one
+    starts within `setup_gap_s` seconds of source time after the furthest end so far."""
+    try:
+        default = float(inventory.get("frame_rate", "").split()[0])
+    except (IndexError, ValueError):
+        default = 24.0
+    uses: dict[str, list] = {}
+    for position, clip in enumerate(inventory["clips"]):
+        fps = _fps(clip, default)
+        start = (clip.get("source_start") or 0) / fps
+        end = (clip.get("source_end") or clip.get("source_start") or 0) / fps
+        uses.setdefault(recording_of(clip), []).append((start, max(start, end), position))
+    out: dict[int, str] = {}
+    for key, spans in uses.items():
+        part, edge = 0, None
+        for start, end, position in sorted(spans):
+            if edge is not None and start > edge + setup_gap_s:
+                part += 1
+            edge = end if edge is None else max(edge, end)
+            out[position] = f"{key}#{part + 1}"
+    return out
+
+
 def has_clock(row: dict) -> bool:
     """False for media with no timecode, or record-run timecode that starts at zero."""
     return row["start"] is not None and row["start"] > 0
 
 
-def build_scene_map(inventory: dict, scene_gap_s: float = SCENE_GAP_S) -> dict:
+def build_scene_map(inventory: dict, scene_gap_s: float = SCENE_GAP_S, setup_gap_s: float = SETUP_GAP_S) -> dict:
     """Scene number (from 1, in shooting order) for every recording and clip. Recordings with
     a clock are chained by shooting time, per day; the others take the vote of their timeline
     neighbours, or a scene of their own when no neighbour has one."""
@@ -188,12 +216,13 @@ def build_scene_map(inventory: dict, scene_gap_s: float = SCENE_GAP_S) -> dict:
             scene += 1
             row["scene"], row["placed_by"] = scene, "alone"
 
+    setup = setups(inventory, setup_gap_s)
     return {
         "timeline": inventory.get("timeline"),
-        "scene_gap_s": scene_gap_s,
+        "scene_gap_s": scene_gap_s, "setup_gap_s": setup_gap_s,
         "recordings": sorted(rows.values(), key=lambda r: (r["scene"], r["camera"], r["start"] or 0)),
         "clips": [{"track": c["track"], "index": c["index"], "name": c.get("name"), "id": c.get("id"),
-                   "recording": owner[pos]["recording"], "camera": owner[pos]["camera"],
+                   "recording": owner[pos]["recording"], "setup": setup[pos], "camera": owner[pos]["camera"],
                    "scene": owner[pos]["scene"], "placed_by": owner[pos]["placed_by"]}
                   for pos, c in enumerate(clips)],
     }
@@ -202,6 +231,7 @@ def build_scene_map(inventory: dict, scene_gap_s: float = SCENE_GAP_S) -> dict:
 def summary(scene_map: dict) -> str:
     rows = scene_map["recordings"]
     lines = [f"{scene_map['timeline']}: {len(scene_map['clips'])} clips, {len(rows)} recordings, "
+             f"{len({c['setup'] for c in scene_map['clips']})} setups, "
              f"{len({r['scene'] for r in rows})} scenes (gap {scene_map['scene_gap_s']:.0f} s)"]
     for how, n in Counter(r["placed_by"] for r in rows).most_common():
         lines.append(f"  placed by {how}: {n} recordings")

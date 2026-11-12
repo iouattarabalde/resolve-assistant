@@ -118,6 +118,17 @@ class Scenes(unittest.TestCase):
         self.assertEqual(scenes["CAMA_0001.MXF"], scenes["CAMB_0001.MXF"])
         self.assertNotEqual(scenes["CAMA_0001.MXF"], scenes["CAMA_0003.MXF"])
 
+    def test_setups_split_a_recording_by_source_distance(self):
+        inv = {"timeline": "T", "frame_rate": "25", "clips": [clip("A.MXF", "10:00:00:00", "10:10:00:00", index=i)
+                                                              for i in range(4)]}
+        for c, (start, end) in zip(inv["clips"], [(0, 100), (120, 200), (5000, 5100), (150, 260)]):
+            c["source_start"], c["source_end"] = start, end   # frames at 25 fps
+        got = [c["setup"] for c in ti.build_scene_map(inv)["clips"]]
+        self.assertEqual(got[0], got[1])        # 0.8 s apart
+        self.assertEqual(got[1], got[3])        # overlapping
+        self.assertNotEqual(got[0], got[2])     # more than 3 minutes further in the take
+        self.assertEqual(len({c["setup"] for c in ti.build_scene_map(inv, setup_gap_s=1e9)["clips"]}), 1)
+
     def test_clockless_clip_with_no_neighbours_stands_alone(self):
         inv = {"timeline": "T", "frame_rate": "25", "clips": [clip("title.png", "", "")]}
         scene_map = ti.build_scene_map(inv)
