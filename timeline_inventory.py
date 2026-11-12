@@ -97,7 +97,8 @@ def _fps(clip: dict, default: float) -> float:
 
 def camera_of(clip: dict) -> str:
     """Camera id: metadata first, then names like CAMA_0043 / CAM_B0090 / 'CAM A0121', then
-    the reel's letters, else '?'."""
+    the reel's letters, then the letters a file name starts with (one family per camera
+    model, which is what the input transform depends on), else '?'."""
     for key in CAMERA_KEYS:
         value = clip["metadata"].get(key) or clip["props"].get(key)
         if value:
@@ -107,7 +108,10 @@ def camera_of(clip: dict) -> str:
     if found:
         return found.group(1)
     reel = re.match(r"[A-Za-z]+", clip["props"].get("Reel Name", ""))
-    return reel.group(0).upper() if reel else "?"
+    if reel:
+        return reel.group(0).upper()
+    family = re.match(r"[A-Za-z]+", name)   # C4025.MP4 -> C, DJI_2025... -> DJI, GX016564 -> GX
+    return family.group(0) if family else "?"
 
 
 def day_of(clip: dict) -> str:

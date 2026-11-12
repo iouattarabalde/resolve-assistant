@@ -87,7 +87,9 @@ class Parsing(unittest.TestCase):
         tagged = clip("x.mov", "", "")
         tagged["metadata"]["Camera #"] = "b"
         self.assertEqual(ti.camera_of(tagged), "B")
-        self.assertEqual(ti.camera_of(clip("DJI_20260806125241_0012_D.MOV", "", "")), "?")
+        self.assertEqual(ti.camera_of(clip("DJI_20260806125241_0012_D.MOV", "", "")), "DJI")
+        self.assertEqual(ti.camera_of(clip("C4025.MP4", "", "")), "C")
+        self.assertEqual(ti.camera_of(clip("0001.mov", "", "")), "?")
 
 
 class Scenes(unittest.TestCase):
