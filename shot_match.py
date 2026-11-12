@@ -590,8 +590,11 @@ def measure_node(off: np.ndarray, on: np.ndarray) -> dict | None:
     gain, power, offset, misfit = [], [], [], 0.0
     for c in range(3):
         level = np.clip(np.searchsorted(np.quantile(la[:, c], np.linspace(0, 1, 41)), la[:, c]) - 1, 0, 39)
-        x = np.array([np.median(la[level == i, c]) for i in range(40)])
-        y = np.array([np.median(lb[level == i, c]) for i in range(40)])
+        filled = [i for i in range(40) if (level == i).any()]   # flat frames leave levels empty
+        x = np.array([np.median(la[level == i, c]) for i in filled])
+        y = np.array([np.median(lb[level == i, c]) for i in filled])
+        if len(x) < 5 or np.ptp(np.log2(np.maximum(x, 1e-6))) < 0.5:
+            return None   # too little tonal range in this frame to read a node from
         plain = fit_node(x, y, 25.0)
         best_offset, best = min(((o, fit_node(x, y, o)) for o in np.arange(20, 30.001, 0.05)),
                                 key=lambda t: t[1][0])
@@ -730,9 +733,19 @@ def get_resolve():
     return r
 
 
+DROP_FRAME = False   # set by open_scene from the timeline settings
+
+
 def frames_to_tc(frame: int, fps: int) -> str:
+    sep = ":"
+    if DROP_FRAME:   # SMPTE drop-frame: skip 2 (29.97) or 4 (59.94) frame numbers a minute, except every tenth
+        d = round(fps / 15)
+        per10, per1 = fps * 600 - 9 * d, fps * 60 - d
+        tens, rem = divmod(frame, per10)
+        frame += 9 * d * tens + (d * ((rem - d) // per1) if rem >= d else 0)
+        sep = ";"
     s, f = divmod(frame, fps)
-    return f"{s // 3600:02d}:{s // 60 % 60:02d}:{s % 60:02d}:{f:02d}"
+    return f"{s // 3600:02d}:{s // 60 % 60:02d}:{s % 60:02d}{sep}{f:02d}"
 
 
 def selected_clips(timeline) -> list:
@@ -965,8 +978,8 @@ def open_scene(flags: bool = True):
         raise Stop("Open a project and a timeline first, then run this again.")
     settings = timeline.GetSettings() or {}  # GetSetting(name) is deprecated in 21.1
     rate = str(settings.get("timelineFrameRate", ""))
-    if str(settings.get("timelineDropFrameTimecode")) == "1" or "DF" in rate.upper():
-        raise Stop("Drop-frame timelines are not supported yet.")
+    global DROP_FRAME
+    DROP_FRAME = str(settings.get("timelineDropFrameTimecode")) == "1" or "DF" in rate.upper()
     try:
         fps = round(float(rate.split()[0]))
     except (IndexError, ValueError):
@@ -1175,7 +1188,10 @@ def run_collect(final: bool = False) -> int:
             if final:
                 problems += export_ungraded_still(project, timeline, item, fps, out_dir / "final" / f"{name}.tif",
                                                   whole_grade=True)
-            m = measure_node(load_still(off), load_still(on)) if off.exists() and on.exists() else None
+            try:
+                m = measure_node(load_still(off), load_still(on)) if off.exists() and on.exists() else None
+            except (np.linalg.LinAlgError, ValueError, FloatingPointError):
+                m = None
             if m is None:
                 problems.append("could not measure the Linear node")
             else:

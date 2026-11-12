@@ -103,6 +103,18 @@ class SolverTest(unittest.TestCase):
     def test_timecode(self):
         self.assertEqual(shot_match.frames_to_tc(86400 + 25, 24), "01:00:01:01")
 
+    def test_drop_frame_timecode(self):
+        with mock.patch.object(shot_match, "DROP_FRAME", True):
+            self.assertEqual(shot_match.frames_to_tc(1799, 30), "00:00:59;29")
+            self.assertEqual(shot_match.frames_to_tc(1800, 30), "00:01:00;02")
+            self.assertEqual(shot_match.frames_to_tc(17982, 30), "00:10:00;00")
+            self.assertEqual(shot_match.frames_to_tc(54142, 30), "00:30:06;16")
+            self.assertEqual(shot_match.frames_to_tc(3600, 60), "00:01:00;04")
+
+    def test_flat_frame_is_not_measured(self):
+        flat = np.full((400, 400, 3), 0.3) + np.random.default_rng(0).integers(0, 2, (400, 400, 3)) * 0.001
+        self.assertIsNone(shot_match.measure_node(flat, flat))
+
     def test_measures_gain_gamma_and_offset_of_a_node(self):
         off = scene(3, np.ones(3), np.full(len(MATERIALS), 1 / len(MATERIALS))) / 65535.0
         lin = shot_match.decode_intermediate(off)
