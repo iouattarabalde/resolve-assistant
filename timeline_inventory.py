@@ -332,10 +332,47 @@ def build_scene_map(inventory: dict, scene_gap_s: float = SCENE_GAP_S, setup_gap
         "merges": [(why, number.get(a, a), number.get(b, b), n) for why, a, b, n in merges],
         "recordings": sorted(rows.values(), key=lambda r: (r["scene"], r["camera"], r["start"] or 0)),
         "clips": [{"track": c["track"], "index": c["index"], "name": c.get("name"), "id": c.get("id"),
+                   "record_start": c.get("record_start") or 0,
                    "recording": owner[pos]["recording"], "setup": setup[pos], "camera": owner[pos]["camera"],
                    "scene": owner[pos]["scene"], "placed_by": owner[pos]["placed_by"]}
                   for pos, c in enumerate(clips)],
     }
+
+
+def cap_scenes(scene_map: dict, limit: int) -> dict:
+    """At most `limit` scenes (scene 0 aside): the smallest scene joins the scene it touches
+    most often in the cut, again and again, then scenes are renumbered in the order they first
+    appear. For a scene map that must fit a fixed set of labels, such as Resolve's 16 flag
+    colours plus "no flag"."""
+    clips = scene_map["clips"]
+    order = sorted((c for c in clips if c["scene"]), key=lambda c: (c["record_start"], c["track"]))
+    joined = []
+    while True:
+        size: dict = {}
+        for c in order:
+            size[c["scene"]] = size.get(c["scene"], 0) + 1
+        if len(size) <= max(1, limit):
+            break
+        small = min(size, key=lambda s: (size[s], -s))
+        touch: dict = {}
+        for a, b in zip(order, order[1:]):
+            if (a["scene"] == small) != (b["scene"] == small):
+                other = b["scene"] if a["scene"] == small else a["scene"]
+                touch[other] = touch.get(other, 0) + 1
+        into = max(touch, key=lambda s: (touch[s], size[s]))
+        joined.append((small, into, size[small]))
+        for row in clips + scene_map["recordings"]:
+            if row["scene"] == small:
+                row["scene"] = into
+    number: dict = {0: 0}
+    for c in order:
+        number.setdefault(c["scene"], len(number))
+    for row in clips + scene_map["recordings"]:
+        row["scene"] = number[row["scene"]]
+    # merges keep the numbers from before the cap; "renumbered" maps those to the final ones
+    scene_map["merges"] = list(scene_map["merges"]) + [("cap", a, b, n) for a, b, n in joined]
+    scene_map["renumbered"] = number
+    return scene_map
 
 
 def summary(scene_map: dict) -> str:

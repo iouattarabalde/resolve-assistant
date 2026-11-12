@@ -165,6 +165,17 @@ class Scenes(unittest.TestCase):
         self.assertEqual([x["scene"] for x in got], [1, 1, 1, 1, 1, 0])
         self.assertEqual(got[-1]["placed_by"], "aside")
 
+    def test_cap_scenes_folds_the_smallest_scenes_into_their_neighbours(self):
+        def day(hour, count, first):
+            return [(f"CAMA_{first + n:04d}.MXF", f"{hour:02d}:{n:02d}:00:00", f"{hour:02d}:{n:02d}:30:00", "2026-08-06")
+                    for n in range(count)]
+        inv = self.cut(*day(8, 4, 100), *day(11, 2, 200), *day(14, 5, 300), *day(17, 3, 400))
+        scene_map = ti.build_scene_map(inv)
+        self.assertEqual([x["scene"] for x in scene_map["clips"]], [1] * 4 + [2] * 2 + [3] * 5 + [4] * 3)
+        capped = ti.cap_scenes(scene_map, 2)
+        self.assertEqual([x["scene"] for x in capped["clips"]], [1] * 4 + [2] * 10)
+        self.assertEqual({r["scene"] for r in capped["recordings"]}, {1, 2})
+
     def test_clockless_clip_with_no_neighbours_stands_alone(self):
         inv = {"timeline": "T", "frame_rate": "25", "clips": [clip("title.png", "", "")]}
         scene_map = ti.build_scene_map(inv)
