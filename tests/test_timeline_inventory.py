@@ -105,7 +105,7 @@ class Scenes(unittest.TestCase):
         ]}
 
     def test_overlap_gap_day_and_neighbours(self):
-        scene_map = ti.build_scene_map(self.inventory())
+        scene_map = ti.build_scene_map(self.inventory(), use_cut=False)
         self.assertEqual([c["scene"] for c in scene_map["clips"]], [1, 1, 1, 1, 1, 2, 3])
         self.assertEqual(scene_map["clips"][4]["placed_by"], "neighbours")
         self.assertEqual(scene_map["clips"][0]["recording"], scene_map["clips"][2]["recording"])
@@ -114,7 +114,7 @@ class Scenes(unittest.TestCase):
     def test_intercut_order_does_not_matter(self):
         inv = self.inventory()
         inv["clips"] = inv["clips"][::-1]
-        scenes = {c["name"]: c["scene"] for c in ti.build_scene_map(inv)["clips"]}
+        scenes = {c["name"]: c["scene"] for c in ti.build_scene_map(inv, use_cut=False)["clips"]}
         self.assertEqual(scenes["CAMA_0001.MXF"], scenes["CAMB_0001.MXF"])
         self.assertNotEqual(scenes["CAMA_0001.MXF"], scenes["CAMA_0003.MXF"])
 
@@ -128,6 +128,42 @@ class Scenes(unittest.TestCase):
         self.assertEqual(got[1], got[3])        # overlapping
         self.assertNotEqual(got[0], got[2])     # more than 3 minutes further in the take
         self.assertEqual(len({c["setup"] for c in ti.build_scene_map(inv, setup_gap_s=1e9)["clips"]}), 1)
+
+    @staticmethod
+    def cut(*shots):
+        """shots: (file, start tc, end tc, day). Placed one after another on one track."""
+        clips = []
+        for n, (name, start, end, day) in enumerate(shots):
+            c = clip(name, start, end, index=n, day=day)
+            c["record_start"], c["record_end"] = n * 100, n * 100 + 100
+            clips.append(c)
+        return {"timeline": "T", "frame_rate": "25", "clips": clips}
+
+    def test_cameras_a_day_apart_but_intercut_are_one_scene(self):
+        a = [(f"CAMA_{n:04d}.MXF", f"10:{n:02d}:00:00", f"10:{n:02d}:30:00", "2026-08-06") for n in range(1, 5)]
+        c = [(f"C{n:04d}.MP4", f"10:{n:02d}:40:00", f"10:{n:02d}:50:00", "2026-08-05") for n in range(1, 5)]
+        later = [(f"CAMA_01{n:02d}.MXF", f"16:{n:02d}:00:00", f"16:{n:02d}:30:00", "2026-08-06") for n in range(1, 4)]
+        inv = self.cut(*[shot for pair in zip(a, c) for shot in pair], *later)
+        self.assertEqual(len({x["scene"] for x in ti.build_scene_map(inv, use_cut=False)["clips"]}), 3)
+        scenes = [x["scene"] for x in ti.build_scene_map(inv)["clips"]]
+        self.assertEqual(scenes, [1] * 8 + [2] * 3)
+
+    def test_same_camera_carrying_on_after_a_pause_is_one_scene(self):
+        first = [(f"CAMA_{n:04d}.MXF", f"10:{n:02d}:00:00", f"10:{n:02d}:30:00", "2026-08-06") for n in range(1, 4)]
+        second = [(f"CAMA_{n:04d}.MXF", f"10:{n:02d}:00:00", f"10:{n:02d}:30:00", "2026-08-06") for n in range(25, 28)]
+        much_later = [(f"CAMA_09{n:02d}.MXF", f"15:{n:02d}:00:00", f"15:{n:02d}:30:00", "2026-08-06") for n in range(1, 4)]
+        scenes = [x["scene"] for x in ti.build_scene_map(self.cut(*first, *second, *much_later))["clips"]]
+        self.assertEqual(scenes, [1] * 6 + [2] * 3)
+
+    def test_a_lone_clip_joins_a_neighbour_and_references_are_set_aside(self):
+        scene = [(f"CAMA_{n:04d}.MXF", f"10:{n:02d}:00:00", f"10:{n:02d}:30:00", "2026-08-06") for n in range(1, 5)]
+        inv = self.cut(*scene[:2], ("C9999.MP4", "20:00:00:00", "20:00:10:00", "2026-08-01"), *scene[2:])
+        reference = clip("offline_v04.mp4", "00:00:00:00", "00:10:00:00", track=2)
+        reference["record_start"], reference["record_end"] = 0, 500
+        inv["clips"].append(reference)
+        got = ti.build_scene_map(inv)["clips"]
+        self.assertEqual([x["scene"] for x in got], [1, 1, 1, 1, 1, 0])
+        self.assertEqual(got[-1]["placed_by"], "aside")
 
     def test_clockless_clip_with_no_neighbours_stands_alone(self):
         inv = {"timeline": "T", "frame_rate": "25", "clips": [clip("title.png", "", "")]}

@@ -27,6 +27,9 @@ from pathlib import Path
 
 SCENE_GAP_S = 600        # recordings further apart than this (seconds of shooting time) start a new scene
 SETUP_GAP_S = 10         # uses of one recording further apart than this in the source are separate setups
+INTERCUT_MIN, INTERCUT_SHARE, INTERCUT_SURE = 3, 0.4, 0.75   # see _merge_by_cut
+INTERCUT_CLOCK_S = 2700
+CONTINUE_GAP_S, CONTINUE_NEAR = 1800, 20
 NEIGHBOURS = 2           # timeline neighbours each side that vote for a clip with no usable clock
 CAMERA_KEYS = ("Camera #", "Camera ID", "Camera", "Camera Label")
 DAY_KEYS = ("Date Recorded", "Shoot Date", "Date Created")
@@ -182,11 +185,9 @@ def has_clock(row: dict) -> bool:
     return row["start"] is not None and row["start"] > 0
 
 
-def build_scene_map(inventory: dict, scene_gap_s: float = SCENE_GAP_S, setup_gap_s: float = SETUP_GAP_S) -> dict:
-    """Scene number (from 1, in shooting order) for every recording and clip. Recordings with
-    a clock are chained by shooting time, per day; the others take the vote of their timeline
-    neighbours, or a scene of their own when no neighbour has one."""
-    rows = recordings(inventory)
+def _base_scenes(inventory: dict, rows: dict, scene_gap_s: float) -> None:
+    """First pass: recordings with a clock chained by shooting time, per day; the others take
+    the vote of their timeline neighbours, or a scene of their own when no neighbour has one."""
     timed = sorted((r for r in rows.values() if has_clock(r)), key=lambda r: (r["day"], r["start"]))
     scene, edge, day = 0, None, None
     for row in timed:
@@ -199,7 +200,8 @@ def build_scene_map(inventory: dict, scene_gap_s: float = SCENE_GAP_S, setup_gap
     owner = {pos: row for row in rows.values() for pos in row["clips"]}
     by_track: dict[int, list[int]] = {}
     for pos, clip in enumerate(clips):
-        by_track.setdefault(clip["track"], []).append(pos)
+        if pos in owner:
+            by_track.setdefault(clip["track"], []).append(pos)
     for row in rows.values():
         if "scene" in row:
             continue
@@ -216,10 +218,118 @@ def build_scene_map(inventory: dict, scene_gap_s: float = SCENE_GAP_S, setup_gap
             scene += 1
             row["scene"], row["placed_by"] = scene, "alone"
 
+
+def _merge_by_cut(rows: dict, order: list[int], owner: dict) -> list[tuple]:
+    """Second pass, from the edit. Camera clocks disagree (a second body a day off, a clock
+    reset to zero), and a shoot pauses, so the clock alone cuts one scene into several.
+    Two scenes become one when
+      - the cut alternates between them: at least INTERCUT_MIN changes from one to the other,
+        making up INTERCUT_SHARE of the smaller scene's borders, and either their times of day
+        are within INTERCUT_CLOCK_S (cameras a day apart) or nearly all its borders (INTERCUT_SURE);
+      - or the same camera, the same day, carried on within CONTINUE_GAP_S and the two sit
+        within CONTINUE_NEAR clips of each other in the cut.
+    Then a scene left with one clip joins the larger of its neighbours in the cut."""
+    scene_of = {pos: owner[pos]["scene"] for pos in order}
+    parent = {s: s for s in set(scene_of.values())}
+
+    def find(s):
+        while parent[s] != s:
+            s = parent[s]
+        return s
+
+    borders: Counter = Counter()
+    for here, there in zip(order, order[1:]):
+        if scene_of[here] != scene_of[there]:
+            borders[frozenset((scene_of[here], scene_of[there]))] += 1
+    total: Counter = Counter()
+    for pair, n in borders.items():
+        for s in pair:
+            total[s] += n
+    span: dict = {}        # scene -> [first, last] time of day
+    cam_span: dict = {}    # (scene, camera, day) -> [first, last]
+    places: dict = {}      # scene -> ranks in the cut
+    rank = {pos: n for n, pos in enumerate(order)}
+    for pos in order:
+        row = owner[pos]
+        places.setdefault(row["scene"], []).append(rank[pos])
+        if row["placed_by"] == "clock":
+            for key, table in ((row["scene"], span), ((row["scene"], row["camera"], row["day"]), cam_span)):
+                lo, hi = table.setdefault(key, [row["start"], row["end"]])
+                table[key] = [min(lo, row["start"]), max(hi, row["end"])]
+
+    def apart(a, b):
+        return max(a[0], b[0]) - min(a[1], b[1])
+
+    merges = []
+    for pair, n in borders.items():
+        one, two = tuple(pair)
+        small = min(one, two, key=lambda s: total[s])
+        if n < INTERCUT_MIN or n < INTERCUT_SHARE * total[small]:
+            continue
+        close = one in span and two in span and apart(span[one], span[two]) <= INTERCUT_CLOCK_S
+        if close or n >= INTERCUT_SURE * total[small]:
+            parent[find(one)] = find(two)
+            merges.append(("intercut", one, two, n))
+    keys = sorted(cam_span)
+    for i, (one, cam, day) in enumerate(keys):
+        for two, cam2, day2 in keys[i + 1:]:
+            if one == two or cam != cam2 or day != day2 or find(one) == find(two):
+                continue
+            gap = apart(cam_span[(one, cam, day)], cam_span[(two, cam2, day2)])
+            if gap <= CONTINUE_GAP_S and min(abs(p - q) for p in places[one] for q in places[two]) <= CONTINUE_NEAR:
+                parent[find(one)] = find(two)
+                merges.append(("continues", one, two, round(gap / 60)))
+    for row in rows.values():
+        row["scene"] = find(row["scene"])
+
+    for _ in range(3):   # a lone clip between two lone clips needs a second look
+        size = Counter(owner[pos]["scene"] for pos in order)
+        for n, pos in enumerate(order):
+            row = owner[pos]
+            if size[row["scene"]] != 1:
+                continue
+            before = owner[order[n - 1]]["scene"] if n else None
+            after = owner[order[n + 1]]["scene"] if n + 1 < len(order) else None
+            if before is None and after is None:
+                continue
+            pick = before if after is None or (before is not None and size[before] >= size[after]) else after
+            merges.append(("single", row["scene"], pick, 1))
+            row["scene"] = pick
+    return merges
+
+
+def build_scene_map(inventory: dict, scene_gap_s: float = SCENE_GAP_S, setup_gap_s: float = SETUP_GAP_S,
+                    use_cut: bool = True) -> dict:
+    """Scene number (from 1, in the order scenes first appear in the cut) for every recording
+    and clip. Clips longer than half the timeline (reference renders) and items with no media
+    (transitions, generators) get scene 0 and take no part."""
+    clips = inventory["clips"]
+    starts = [c.get("record_start") or 0 for c in clips]
+    ends = [c.get("record_end") or 0 for c in clips]
+    length = (max(ends) - min(starts)) if clips else 0
+    aside = {pos for pos, c in enumerate(clips)
+             if not c.get("media_id") and not c["props"]
+             or (len(clips) > 2 and length and (ends[pos] - starts[pos]) > length / 2)}
+    rows = recordings(inventory)
+    kept = {key: row for key, row in rows.items() if not set(row["clips"]) & aside}
+    _base_scenes(inventory, kept, scene_gap_s)
+    owner = {pos: row for row in kept.values() for pos in row["clips"]}
+    order = sorted(owner, key=lambda pos: (starts[pos], clips[pos]["track"]))
+    merges = _merge_by_cut(kept, order, owner) if use_cut else []
+    number: dict = {}
+    for pos in order:
+        number.setdefault(owner[pos]["scene"], len(number) + 1)
+    for row in kept.values():
+        row["scene"] = number[row["scene"]]
+    for key, row in rows.items():
+        if key not in kept:
+            row["scene"], row["placed_by"] = 0, "aside"
+    owner = {pos: row for row in rows.values() for pos in row["clips"]}
     setup = setups(inventory, setup_gap_s)
     return {
         "timeline": inventory.get("timeline"),
         "scene_gap_s": scene_gap_s, "setup_gap_s": setup_gap_s,
+        "merges": [(why, number.get(a, a), number.get(b, b), n) for why, a, b, n in merges],
         "recordings": sorted(rows.values(), key=lambda r: (r["scene"], r["camera"], r["start"] or 0)),
         "clips": [{"track": c["track"], "index": c["index"], "name": c.get("name"), "id": c.get("id"),
                    "recording": owner[pos]["recording"], "setup": setup[pos], "camera": owner[pos]["camera"],
