@@ -109,3 +109,17 @@ The first builds a hero and a shot one stop brighter and slightly warmer, framed
 differently, and checks the solver gives the inverse gain. The second runs the Resolve side
 against a fake Resolve : which nodes are off at export, the playhead and nodes restored,
 and Gain written to the shot only in apply mode.
+
+## timeline_inventory.py
+
+Read-only inventory of a timeline and a scene map built from it, with no flags. `read_timeline`
+lists every video clip with its camera, source recording and timecode (getters only, nothing
+is written to Resolve). `build_scene_map` groups the clips into recordings (same source file),
+cameras and scenes (recordings whose shooting times touch or overlap, whatever the cut order).
+Clips with no time-of-day timecode take the vote of their timeline neighbours.
+
+```
+python timeline_inventory.py INVENTORY.json
+```
+
+Standard library only. Tests : `python3 -m unittest tests.test_timeline_inventory -v`
