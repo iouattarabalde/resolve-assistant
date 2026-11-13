@@ -176,6 +176,19 @@ class Scenes(unittest.TestCase):
         self.assertEqual([x["scene"] for x in capped["clips"]], [1] * 4 + [2] * 10)
         self.assertEqual({r["scene"] for r in capped["recordings"]}, {1, 2})
 
+    def test_smooth_by_cut_folds_lone_and_drone_clips_but_keeps_an_intercut(self):
+        def row(n, scene, camera="A"):
+            return {"track": 1, "index": n, "id": str(n), "name": f"c{n}", "record_start": n * 10,
+                    "recording": f"r{n}", "camera": camera, "scene": scene, "placed_by": "clock"}
+        # 1 x8, a lone main-camera clip of 2, a drone clip of 3, then 1 and 2 cut back and forth
+        scenes = [1, 1, 1, 1, 2, 1, 1, 1, 3, 1, 1, 2, 1, 2, 1, 2, 2, 2, 2]
+        cams = ["A"] * 8 + ["DJI"] + ["A"] * 10
+        clips = [row(n, s, c) for n, (s, c) in enumerate(zip(scenes, cams))]
+        recs = [{"recording": c["recording"], "scene": c["scene"]} for c in clips]
+        got = [c["scene"] for c in ti.smooth_by_cut({"clips": clips, "recordings": recs})["clips"]]
+        self.assertEqual(got, [1] * 11 + [2, 1, 2, 1, 2, 2, 2, 2])
+        self.assertEqual(clips[4]["placed_by"], "cut")
+
     def test_clockless_clip_with_no_neighbours_stands_alone(self):
         inv = {"timeline": "T", "frame_rate": "25", "clips": [clip("title.png", "", "")]}
         scene_map = ti.build_scene_map(inv)

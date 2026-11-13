@@ -339,6 +339,71 @@ def build_scene_map(inventory: dict, scene_gap_s: float = SCENE_GAP_S, setup_gap
     }
 
 
+CUT_SWITCH_COST = 0.45   # see smooth_by_cut
+CUT_ISLAND_COST = 0.4
+CUT_WEAK_COST = 0.01
+CUT_WINDOW = 3
+MAIN_CAMERA_SHARE = 0.1
+
+
+def smooth_by_cut(scene_map: dict, switch_cost: float = CUT_SWITCH_COST, island_cost: float = CUT_ISLAND_COST,
+                  weak_cost: float = CUT_WEAK_COST, window: int = CUT_WINDOW) -> dict:
+    """Neighbours in the cut over clocks, as a colourist groups a first pass: a scene is mostly a
+    run of the edit. Along the cut, each clip keeps its scene unless changing it saves scene
+    changes (each costs `switch_cost`):
+      - clips of the main cameras (each at least MAIN_CAMERA_SHARE of the clips) placed by their
+        clock cost 1 to move, or `island_cost` when no clip of their scene sits within `window`
+        clips of them in the cut (a lone clip among another scene, not a back-and-forth intercut);
+      - drone, action-camera, phone and stock clips, and clips placed without a clock, cost
+        `weak_cost`: they go with the scene they are cut into.
+    Solved for the whole cut at once (Viterbi). Sets "placed_by" to "cut" on the clips moved."""
+    clips = scene_map["clips"]
+    order = sorted((c for c in clips if c["scene"]), key=lambda c: (c["record_start"], c["track"]))
+    if len(order) < 3:
+        return scene_map
+    labels = sorted({c["scene"] for c in order})
+    index = {s: k for k, s in enumerate(labels)}
+    cams = Counter(c["camera"] for c in order)
+    main = {cam for cam, n in cams.items() if n >= MAIN_CAMERA_SHARE * len(order)}
+    cost = []
+    for n, c in enumerate(order):
+        if c["camera"] in main and c.get("placed_by") == "clock":
+            near = order[max(0, n - window):n] + order[n + 1:n + 1 + window]
+            move = 1.0 if any(o["scene"] == c["scene"] for o in near) else island_cost
+        else:
+            move = weak_cost
+        row = [move] * len(labels)
+        row[index[c["scene"]]] = 0.0
+        cost.append(row)
+    total, back = list(cost[0]), []
+    for row in cost[1:]:
+        best = min(range(len(labels)), key=lambda k: total[k])
+        step, new = [], []
+        for k in range(len(labels)):
+            stay, switch = total[k], total[best] + switch_cost
+            step.append(k if stay <= switch else best)
+            new.append(min(stay, switch) + row[k])
+        back.append(step)
+        total = new
+    k = min(range(len(labels)), key=lambda j: total[j])
+    path = [k]
+    for step in reversed(back):
+        k = step[k]
+        path.append(k)
+    path.reverse()
+    for c, k in zip(order, path):
+        if labels[k] != c["scene"]:
+            c["scene"], c["placed_by"] = labels[k], "cut"
+    # A recording now used in several scenes is listed under the one most of its clips are in
+    votes: dict = {}
+    for c in order:
+        votes.setdefault(c["recording"], Counter())[c["scene"]] += 1
+    for row in scene_map["recordings"]:
+        if row["recording"] in votes:
+            row["scene"] = votes[row["recording"]].most_common(1)[0][0]
+    return scene_map
+
+
 def cap_scenes(scene_map: dict, limit: int) -> dict:
     """At most `limit` scenes (scene 0 aside): the smallest scene joins the scene it touches
     most often in the cut, again and again, then scenes are renumbered in the order they first
