@@ -210,6 +210,24 @@ class Scenes(unittest.TestCase):
         capped = ti.cap_scenes(sm, 2, looks)
         self.assertEqual([c["scene"] for c in capped["clips"]], [1] * 12 + [2] * 16)
 
+    def test_refine_by_look_moves_a_night_clip_out_of_a_day_scene(self):
+        def row(n, scene):
+            return {"track": 1, "index": n, "id": str(n), "name": f"c{n}", "record_start": n * 10,
+                    "recording": f"r{n}", "camera": "A", "scene": scene, "placed_by": "clock"}
+        # Clock and cut put clips 8-11 (night) in the day scene 1; scene 2 is the night scene
+        clips = [row(n, 1) for n in range(12)] + [row(12 + n, 2) for n in range(8)]
+        recs = [{"recording": c["recording"], "scene": c["scene"]} for c in clips]
+        day, night = (0.4, 0.2), (0.08, 1.6)
+        looks = {str(n): (day if n < 8 else night) for n in range(20)}
+        clock = {str(n): 1 if n < 12 else 2 for n in range(20)}
+        sm = ti.refine_by_look({"clips": clips, "recordings": recs, "merges": []}, looks, clock)
+        self.assertEqual([c["scene"] for c in sm["clips"]], [1] * 8 + [2] * 12)
+        # One odd frame in a run does not leave it: the cut outweighs one clip's look
+        looks["3"] = night
+        clips = [row(n, 1) for n in range(12)] + [row(12 + n, 2) for n in range(8)]
+        sm = ti.refine_by_look({"clips": clips, "recordings": recs, "merges": []}, looks, clock)
+        self.assertEqual(sm["clips"][3]["scene"], 1)
+
     def test_clockless_clip_with_no_neighbours_stands_alone(self):
         inv = {"timeline": "T", "frame_rate": "25", "clips": [clip("title.png", "", "")]}
         scene_map = ti.build_scene_map(inv)

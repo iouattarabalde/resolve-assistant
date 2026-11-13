@@ -350,6 +350,8 @@ LOOK_WARM_UNIT = 0.5       # half a stop of red over blue is one unit
 LOOK_PENALTY = 12.0        # cost of one more look segment inside a scene
 LOOK_MIN_LEN = 6           # clips: a look segment shorter than this is not split off
 LOOK_TOUCH_BONUS = 0.15    # cap_scenes with looks: each shared cut boundary (up to 3) counts this much
+REFINE_SWITCH_COST = 2.0   # see refine_by_look
+REFINE_CLOCK_COST = 0.6
 MAIN_CAMERA_SHARE = 0.1
 
 
@@ -421,8 +423,84 @@ def smooth_by_cut(scene_map: dict, switch_cost: float = CUT_SWITCH_COST, island_
 def look_vector(look) -> tuple[float, float]:
     """(median level, warmth) of a clip's frame, as look-distance units: level in stops,
     warmth = log2(red / blue) of its mid-tones."""
-    level, warmth = look
+    level, warmth = look[0], look[1]
     return (math.log2(max(level, 1e-3)) / LOOK_LUM_STOP, warmth / LOOK_WARM_UNIT)
+
+
+def look_features(look) -> list[float]:
+    """The look of a clip as one vector for refine_by_look: (level, warmth) as look_vector,
+    then, when the look carries it, the frame's layout: 3 x 4 zones of (log2 level, log2
+    red / blue, log2 green / magenta), scaled so a one-stop change over the whole frame
+    weighs about as much as one stop of median level."""
+    vec = list(look_vector(look))
+    layout = look[2] if len(look) > 2 else []
+    if layout:
+        norm = math.sqrt(len(layout))
+        vec += [(v if k % 3 == 0 else v / LOOK_WARM_UNIT) / norm for k, v in enumerate(layout)]
+    return vec
+
+
+def refine_by_look(scene_map: dict, looks: dict, clock: dict, switch_cost: float = REFINE_SWITCH_COST,
+                   clock_cost: float = REFINE_CLOCK_COST, rounds: int = 5) -> dict:
+    """Last pass, in the order of weight Ismael gave (2026-11-12): look first, cut second,
+    clock last. Each clip, in cut order, may move to any scene: its cost there is its look
+    distance to the scene's centre (look_features), plus `clock_cost` unless that scene holds
+    most of the clips of its clock scene (`clock`: {clip id: scene from the clock alone});
+    each change of scene along the cut costs `switch_cost`. Solved for the whole cut at once
+    (Viterbi), then the centres move and it is solved again, `rounds` times at most.
+    Scenes are then renumbered in the order they first appear."""
+    clips = scene_map["clips"]
+    order = sorted((c for c in clips if c["scene"] and c["id"] in looks), key=lambda c: (c["record_start"], c["track"]))
+    if len(order) < 3:
+        return scene_map
+    vecs = [look_features(looks[c["id"]]) for c in order]
+    dims = min(len(v) for v in vecs)
+    vecs = [v[:dims] for v in vecs]
+    label = [c["scene"] for c in order]
+    for _ in range(rounds):
+        scenes = sorted(set(label))
+        centre = []
+        for s in scenes:
+            members = [v for v, l in zip(vecs, label) if l == s]
+            centre.append([sum(col) / len(members) for col in zip(*members)])
+        home: dict = {}
+        for c, l in zip(order, label):
+            home.setdefault(clock.get(c["id"]), Counter())[l] += 1
+        cost = []
+        for c, v in zip(order, vecs):
+            top = home[clock.get(c["id"])].most_common(1)[0][0]
+            cost.append([math.dist(v, m) + (0.0 if s == top else clock_cost) for s, m in zip(scenes, centre)])
+        total, back = list(cost[0]), []
+        for row in cost[1:]:
+            best = min(range(len(scenes)), key=lambda k: total[k])
+            step, new = [], []
+            for k in range(len(scenes)):
+                stay, switch = total[k], total[best] + switch_cost
+                step.append(k if stay <= switch else best)
+                new.append(min(stay, switch) + row[k])
+            back.append(step)
+            total = new
+        k = min(range(len(scenes)), key=lambda j: total[j])
+        path = [k]
+        for step in reversed(back):
+            k = step[k]
+            path.append(k)
+        path.reverse()
+        new_label = [scenes[k] for k in path]
+        if new_label == label:
+            break
+        label = new_label
+    for c, l in zip(order, label):
+        if c["scene"] != l:
+            c["scene"], c["placed_by"] = l, "look"
+    everything = sorted((c for c in clips if c["scene"]), key=lambda c: (c["record_start"], c["track"]))
+    number: dict = {0: 0}
+    for c in everything:
+        number.setdefault(c["scene"], len(number))
+    for row in clips:
+        row["scene"] = number.get(row["scene"], row["scene"])
+    _relabel_recordings(scene_map, everything)
+    return scene_map
 
 
 def _median(xs: list) -> float:
