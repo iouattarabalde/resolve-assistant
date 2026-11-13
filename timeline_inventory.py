@@ -352,6 +352,8 @@ LOOK_MIN_LEN = 6           # clips: a look segment shorter than this is not spli
 LOOK_TOUCH_BONUS = 0.15    # cap_scenes with looks: each shared cut boundary (up to 3) counts this much
 REFINE_SWITCH_COST = 2.0   # see refine_by_look
 REFINE_CLOCK_COST = 0.6
+DARK_LEVEL = 0.1          # below this median level, colour counts less and less
+DARK_COLOUR_FLOOR = 0.15  # colour weight in the darkest frames (see _colour_weight)
 MAIN_CAMERA_SHARE = 0.1
 
 
@@ -424,7 +426,13 @@ def look_vector(look) -> tuple[float, float]:
     """(median level, warmth) of a clip's frame, as look-distance units: level in stops,
     warmth = log2(red / blue) of its mid-tones."""
     level, warmth = look[0], look[1]
-    return (math.log2(max(level, 1e-3)) / LOOK_LUM_STOP, warmth / LOOK_WARM_UNIT)
+    return (math.log2(max(level, 1e-3)) / LOOK_LUM_STOP, warmth * _colour_weight(level) / LOOK_WARM_UNIT)
+
+
+def _colour_weight(level: float) -> float:
+    """Colour counts less in the dark: night frames are lit by coloured sources (club lights,
+    neon, sodium) that change from shot to shot within one scene."""
+    return min(1.0, max(DARK_COLOUR_FLOOR, level / DARK_LEVEL))
 
 
 def look_features(look) -> list[float]:
@@ -436,7 +444,10 @@ def look_features(look) -> list[float]:
     layout = look[2] if len(look) > 2 else []
     if layout:
         norm = math.sqrt(len(layout))
-        vec += [(v if k % 3 == 0 else v / LOOK_WARM_UNIT) / norm for k, v in enumerate(layout)]
+        for z in range(0, len(layout) - 2, 3):
+            weight = _colour_weight(2.0 ** layout[z])
+            vec += [layout[z] / norm, layout[z + 1] * weight / LOOK_WARM_UNIT / norm,
+                    layout[z + 2] * weight / LOOK_WARM_UNIT / norm]
     return vec
 
 
