@@ -339,21 +339,24 @@ def build_scene_map(inventory: dict, scene_gap_s: float = SCENE_GAP_S, setup_gap
     }
 
 
-CUT_SWITCH_COST = 0.45   # see smooth_by_cut
+CUT_SWITCH_COST = 1.5   # see smooth_by_cut
 CUT_ISLAND_COST = 0.4
 CUT_WEAK_COST = 0.01
 CUT_WINDOW = 3
+CUT_INTERCUT_COST = 4.0
 MAIN_CAMERA_SHARE = 0.1
 
 
 def smooth_by_cut(scene_map: dict, switch_cost: float = CUT_SWITCH_COST, island_cost: float = CUT_ISLAND_COST,
-                  weak_cost: float = CUT_WEAK_COST, window: int = CUT_WINDOW) -> dict:
+                  weak_cost: float = CUT_WEAK_COST, window: int = CUT_WINDOW,
+                  intercut_cost: float = CUT_INTERCUT_COST) -> dict:
     """Neighbours in the cut over clocks, as a colourist groups a first pass: a scene is mostly a
     run of the edit. Along the cut, each clip keeps its scene unless changing it saves scene
     changes (each costs `switch_cost`):
       - clips of the main cameras (each at least MAIN_CAMERA_SHARE of the clips) placed by their
         clock cost 1 to move, or `island_cost` when no clip of their scene sits within `window`
-        clips of them in the cut (a lone clip among another scene, not a back-and-forth intercut);
+        clips of them in the cut (a lone clip among another scene, not a back-and-forth intercut),
+        and `intercut_cost` inside an A B A B intercut, so that one survives a high switch cost;
       - drone, action-camera, phone and stock clips, and clips placed without a clock, cost
         `weak_cost`: they go with the scene they are cut into.
     Solved for the whole cut at once (Viterbi). Sets "placed_by" to "cut" on the clips moved."""
@@ -370,6 +373,11 @@ def smooth_by_cut(scene_map: dict, switch_cost: float = CUT_SWITCH_COST, island_
         if c["camera"] in main and c.get("placed_by") == "clock":
             near = order[max(0, n - window):n] + order[n + 1:n + 1 + window]
             move = 1.0 if any(o["scene"] == c["scene"] for o in near) else island_cost
+            # A back-and-forth intercut (A B A B A): the clips two away on both sides are its scene
+            if any(0 <= n + 2 * d < len(order) and order[n + 2 * d]["scene"] == c["scene"]
+                   and order[n + d]["scene"] != c["scene"] and 0 <= n - d < len(order)
+                   and order[n - d]["scene"] == order[n + d]["scene"] for d in (-1, 1)):
+                move = intercut_cost
         else:
             move = weak_cost
         row = [move] * len(labels)
