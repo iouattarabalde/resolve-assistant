@@ -20,6 +20,7 @@ Standard library only.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from collections import Counter
@@ -344,6 +345,11 @@ CUT_ISLAND_COST = 0.4
 CUT_WEAK_COST = 0.01
 CUT_WINDOW = 3
 CUT_INTERCUT_COST = 4.0
+LOOK_LUM_STOP = 1.0        # see split_by_look: one stop of median level is one unit of look distance
+LOOK_WARM_UNIT = 0.5       # half a stop of red over blue is one unit
+LOOK_PENALTY = 12.0        # cost of one more look segment inside a scene
+LOOK_MIN_LEN = 6           # clips: a look segment shorter than this is not split off
+LOOK_TOUCH_BONUS = 0.15    # cap_scenes with looks: each shared cut boundary (up to 3) counts this much
 MAIN_CAMERA_SHARE = 0.1
 
 
@@ -412,11 +418,87 @@ def smooth_by_cut(scene_map: dict, switch_cost: float = CUT_SWITCH_COST, island_
     return scene_map
 
 
-def cap_scenes(scene_map: dict, limit: int) -> dict:
-    """At most `limit` scenes (scene 0 aside): the smallest scene joins the scene it touches
-    most often in the cut, again and again, then scenes are renumbered in the order they first
-    appear. For a scene map that must fit a fixed set of labels, such as Resolve's 16 flag
-    colours plus "no flag"."""
+def look_vector(look) -> tuple[float, float]:
+    """(median level, warmth) of a clip's frame, as look-distance units: level in stops,
+    warmth = log2(red / blue) of its mid-tones."""
+    level, warmth = look
+    return (math.log2(max(level, 1e-3)) / LOOK_LUM_STOP, warmth / LOOK_WARM_UNIT)
+
+
+def _median(xs: list) -> float:
+    s = sorted(xs)
+    n = len(s)
+    return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
+
+
+def _look_cost(vs: list) -> float:
+    m0, m1 = _median([v[0] for v in vs]), _median([v[1] for v in vs])
+    return sum(min(abs(v[0] - m0) + abs(v[1] - m1), 3.0) for v in vs)   # one odd clip costs at most 3
+
+
+def _relabel_recordings(scene_map: dict, order: list) -> None:
+    votes: dict = {}
+    for c in order:
+        votes.setdefault(c["recording"], Counter())[c["scene"]] += 1
+    for row in scene_map["recordings"]:
+        if row["recording"] in votes:
+            row["scene"] = votes[row["recording"]].most_common(1)[0][0]
+
+
+def split_by_look(scene_map: dict, looks: dict, penalty: float = LOOK_PENALTY, min_len: int = LOOK_MIN_LEN) -> dict:
+    """Clocks and the cut can join a day street, a shop and a night bar into one scene. Each
+    scene's clips, in cut order, are cut into runs of one look (`looks`: {clip id: (median
+    level, warmth)}), each run at least `min_len` clips, each new run costing `penalty`
+    (optimal partition). Runs after the first become new scenes; clips without a look stay
+    with the clip before them in the cut."""
+    clips = scene_map["clips"]
+    order = sorted((c for c in clips if c["scene"]), key=lambda c: (c["record_start"], c["track"]))
+    next_id = max([c["scene"] for c in clips] + [0]) + 1
+    splits = []
+    for s in sorted({c["scene"] for c in order}):
+        members = [c for c in order if c["scene"] == s]
+        seen = [c for c in members if c["id"] in looks]
+        n = len(seen)
+        if n < 2 * min_len:
+            continue
+        vs = [look_vector(looks[c["id"]]) for c in seen]
+        best, back = [0.0] + [math.inf] * n, [0] * (n + 1)
+        for j in range(min_len, n + 1):
+            for i in [0] + list(range(min_len, j - min_len + 1)):
+                if best[i] < math.inf:
+                    cost = best[i] + _look_cost(vs[i:j]) + penalty
+                    if cost < best[j]:
+                        best[j], back[j] = cost, i
+        runs, j = [], n
+        while j > 0:
+            runs.append((back[j], j))
+            j = back[j]
+        if len(runs) < 2:
+            continue
+        runs.reverse()
+        label = {}
+        for k, (i, j) in enumerate(runs):
+            for c in seen[i:j]:
+                label[c["id"]] = s if k == 0 else next_id + k - 1
+        next_id += len(runs) - 1
+        splits.append((s, len(runs)))
+        last = label[seen[0]["id"]]
+        for c in members:
+            last = label.get(c["id"], last)
+            c["scene"] = last
+    _relabel_recordings(scene_map, order)
+    scene_map["merges"] = list(scene_map["merges"]) + [("look", s, k, 0) for s, k in splits]
+    return scene_map
+
+
+def cap_scenes(scene_map: dict, limit: int, looks: dict | None = None) -> dict:
+    """At most `limit` scenes (scene 0 aside): the smallest scene joins another, again and
+    again, then scenes are renumbered in the order they first appear. For a scene map that must
+    fit a fixed set of labels, such as Resolve's 16 flag colours plus "no flag". Without
+    `looks` it joins the scene it touches most often in the cut; with them ({clip id: (median
+    level, warmth)}) the scene that looks most like it, anywhere in the cut, each shared cut
+    boundary (up to 3) counting LOOK_TOUCH_BONUS: a night bar never joins a day street just
+    because the edit puts them side by side."""
     clips = scene_map["clips"]
     order = sorted((c for c in clips if c["scene"]), key=lambda c: (c["record_start"], c["track"]))
     joined = []
@@ -432,7 +514,20 @@ def cap_scenes(scene_map: dict, limit: int) -> dict:
             if (a["scene"] == small) != (b["scene"] == small):
                 other = b["scene"] if a["scene"] == small else a["scene"]
                 touch[other] = touch.get(other, 0) + 1
-        into = max(touch, key=lambda s: (touch[s], size[s]))
+        if looks:
+            centre = {}
+            for c in order:
+                if c["id"] in looks:
+                    centre.setdefault(c["scene"], []).append(look_vector(looks[c["id"]]))
+            centre = {k: (_median([v[0] for v in vs]), _median([v[1] for v in vs])) for k, vs in centre.items()}
+
+            def distance(o):
+                d = (abs(centre[small][0] - centre[o][0]) + abs(centre[small][1] - centre[o][1])
+                     if small in centre and o in centre else 2.0)
+                return d - LOOK_TOUCH_BONUS * min(touch.get(o, 0), 3)
+            into = min((o for o in size if o != small), key=lambda o: (distance(o), -size[o]))
+        else:
+            into = max(touch, key=lambda s: (touch[s], size[s]))
         joined.append((small, into, size[small]))
         for row in clips + scene_map["recordings"]:
             if row["scene"] == small:

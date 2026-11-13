@@ -189,6 +189,27 @@ class Scenes(unittest.TestCase):
         self.assertEqual(got, [1] * 11 + [2, 1, 2, 1, 2, 2, 2, 2])
         self.assertEqual(clips[4]["placed_by"], "cut")
 
+    def test_split_by_look_parts_a_day_street_from_a_night_bar(self):
+        def row(n, scene):
+            return {"track": 1, "index": n, "id": str(n), "name": f"c{n}", "record_start": n * 10,
+                    "recording": f"r{n}", "camera": "A", "scene": scene, "placed_by": "clock"}
+        clips = [row(n, 1) for n in range(20)] + [row(20 + n, 2) for n in range(8)]
+        recs = [{"recording": c["recording"], "scene": c["scene"]} for c in clips]
+        day, night, bright_night = (0.4, 0.2), (0.1, 1.5), (0.35, 1.4)
+        looks = {str(n): day for n in range(12)}
+        looks.update({str(n): night for n in range(12, 20)})
+        looks["14"] = day                                    # one odd shot does not make a scene
+        looks.update({str(n): bright_night for n in range(20, 28)})
+        looks.pop("3")                                       # a clip with no frame stays with its neighbours
+        sm = ti.split_by_look({"clips": clips, "recordings": recs, "merges": []}, looks)
+        got = [c["scene"] for c in sm["clips"]]
+        self.assertEqual(got[:12], [1] * 12)
+        self.assertEqual(len(set(got[12:20])), 1)
+        self.assertNotEqual(got[12], 1)
+        # Capped to 2 with looks, the night run joins the other night scene, not the day it is cut against
+        capped = ti.cap_scenes(sm, 2, looks)
+        self.assertEqual([c["scene"] for c in capped["clips"]], [1] * 12 + [2] * 16)
+
     def test_clockless_clip_with_no_neighbours_stands_alone(self):
         inv = {"timeline": "T", "frame_rate": "25", "clips": [clip("title.png", "", "")]}
         scene_map = ti.build_scene_map(inv)
